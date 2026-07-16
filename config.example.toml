@@ -14,10 +14,10 @@ insights_folder = "Transcript Insights"
 folder = "Pocket AI Recordings"
 
 [granola]
-# Paste your Granola bearer/session token here to enable Granola sync.
-# Leave empty to skip Granola.
+# Paste your Granola API key (starts with grn_) to enable Granola sync.
+# Create one in the Granola desktop app (Business plan). Leave empty to skip Granola.
 token = ""
-api_base = "https://api.granola.ai"
+api_base = "https://public-api.granola.ai/v1"
 
 [ollama]
 host = "http://localhost:11434"

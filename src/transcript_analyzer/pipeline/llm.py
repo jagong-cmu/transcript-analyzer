@@ -46,13 +46,22 @@ class LLM:
 
     # ---------- chat ----------
 
+    # Default context window. Ollama defaults to 2048, which truncates long
+    # transcripts (and the format instructions with them). Override per call.
+    DEFAULT_NUM_CTX = 8192
+
+    def _options(self, options: Optional[dict]) -> dict:
+        opts = dict(options or {"temperature": 0.2})
+        opts.setdefault("num_ctx", self.DEFAULT_NUM_CTX)
+        return opts
+
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=8))
     def chat(
         self,
         system: str,
         user: str,
         *,
-        as_json: bool = False,
+        fmt=None,
         options: Optional[dict] = None,
     ) -> str:
         payload = {
@@ -62,10 +71,10 @@ class LLM:
                 {"role": "user", "content": user},
             ],
             "stream": False,
-            "options": options or {"temperature": 0.2},
+            "options": self._options(options),
         }
-        if as_json:
-            payload["format"] = "json"
+        if fmt is not None:  # "json" or a JSON Schema dict (Ollama structured outputs)
+            payload["format"] = fmt
         try:
             r = httpx.post(f"{self.host}/api/chat", json=payload, timeout=self.timeout)
             r.raise_for_status()
@@ -73,9 +82,15 @@ class LLM:
             raise OllamaError(f"chat request failed: {e}") from e
         return r.json()["message"]["content"]
 
-    def chat_json(self, system: str, user: str, options: Optional[dict] = None) -> dict:
-        """Chat that must return a JSON object. Tolerates code fences / stray text."""
-        raw = self.chat(system, user, as_json=True, options=options)
+    def chat_json(
+        self,
+        system: str,
+        user: str,
+        schema: Optional[dict] = None,
+        options: Optional[dict] = None,
+    ) -> dict:
+        """Chat that must return a JSON object. Pass a JSON Schema to force the shape."""
+        raw = self.chat(system, user, fmt=schema if schema is not None else "json", options=options)
         return _parse_json_object(raw)
 
     def chat_stream(self, system: str, user: str) -> Iterator[str]:
@@ -86,7 +101,7 @@ class LLM:
                 {"role": "user", "content": user},
             ],
             "stream": True,
-            "options": {"temperature": 0.3},
+            "options": self._options({"temperature": 0.3}),
         }
         with httpx.stream(
             "POST", f"{self.host}/api/chat", json=payload, timeout=self.timeout

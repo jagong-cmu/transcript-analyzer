@@ -86,6 +86,14 @@ def get_sync_hash(conn: sqlite3.Connection, source: str, native_id: str) -> Opti
     return row["content_hash"] if row else None
 
 
+def get_sync_note_path(conn: sqlite3.Connection, source: str, native_id: str) -> Optional[str]:
+    row = conn.execute(
+        "SELECT note_path FROM sync_state WHERE source = ? AND native_id = ?",
+        (source, native_id),
+    ).fetchone()
+    return row["note_path"] if row and row["note_path"] else None
+
+
 def record_sync(
     conn: sqlite3.Connection,
     source: str,
@@ -203,3 +211,18 @@ def load_all_chunk_embeddings(
 def clear_index(conn: sqlite3.Connection) -> None:
     conn.execute("DELETE FROM chunks")
     conn.execute("DELETE FROM transcripts")
+
+
+# ---------- meta (key/value, e.g. incremental-sync high-water marks) ----------
+
+def get_meta(conn: sqlite3.Connection, key: str) -> Optional[str]:
+    row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )

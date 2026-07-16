@@ -8,7 +8,24 @@ from ..models import Insight, Transcript
 from .categorize import Taxonomy
 from .llm import LLM
 
-_MAX_CHARS = 24000  # keep the prompt within a small local model's context window
+_MAX_CHARS = 24000  # ~6k tokens of transcript; fits comfortably in num_ctx below
+_NUM_CTX = 16384    # room for instructions + transcript + JSON output
+
+# JSON Schema passed to Ollama structured outputs to force the exact shape.
+INSIGHT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string"},
+        "key_points": {"type": "array", "items": {"type": "string"}},
+        "action_items": {"type": "array", "items": {"type": "string"}},
+        "people": {"type": "array", "items": {"type": "string"}},
+        "topics": {"type": "array", "items": {"type": "string"}},
+        "category": {"type": "string"},
+        "sentiment": {"type": "string"},
+    },
+    "required": ["summary", "key_points", "action_items", "people", "topics",
+                 "category", "sentiment"],
+}
 
 SYSTEM = """You are an assistant that reads a meeting or conversation transcript and
 extracts a concise, structured summary. You ALWAYS respond with a single JSON object
@@ -57,7 +74,10 @@ def extract_insight(
     )
 
     try:
-        data = llm.chat_json(SYSTEM, user)
+        data = llm.chat_json(
+            SYSTEM, user, schema=INSIGHT_SCHEMA,
+            options={"temperature": 0.2, "num_ctx": _NUM_CTX},
+        )
     except Exception:  # noqa: BLE001 - fall back to a minimal insight on LLM/JSON failure
         data = {}
 

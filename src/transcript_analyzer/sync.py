@@ -10,10 +10,21 @@ import sys
 from datetime import datetime, timezone
 from typing import Iterable, Optional
 
+import os
+
 from .config import Config, load_config
 from .connectors import pocket
-from .db import get_conn, get_sync_hash, record_sync
+from .db import (
+    get_conn,
+    get_meta,
+    get_sync_hash,
+    get_sync_note_path,
+    record_sync,
+    set_meta,
+)
 from .models import Transcript
+
+GRANOLA_HIGH_WATER = "granola_last_created_at"
 from .obsidian import writer
 from .pipeline.categorize import Taxonomy
 from .pipeline.indexer import index_note
@@ -25,13 +36,18 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _iter_source(cfg: Config, source: str, limit: Optional[int]) -> Iterable[Transcript]:
+def _iter_source(
+    cfg: Config,
+    source: str,
+    limit: Optional[int],
+    created_after: Optional[str] = None,
+) -> Iterable[Transcript]:
     if source == "pocket":
         yield from _limited(pocket.iter_transcripts(cfg), limit)
     elif source == "granola":
         from .connectors import granola  # imported lazily (needs token)
 
-        yield from granola.iter_transcripts(cfg, limit=limit)
+        yield from granola.iter_transcripts(cfg, limit=limit, created_after=created_after)
     else:
         raise ValueError(f"unknown source: {source}")
 
@@ -64,8 +80,21 @@ def process_transcript(
     }
     if dry_run:
         return result
+
+    # If this transcript was previously written under a different category/name,
+    # remove the stale note file so we don't leave duplicates in the vault.
+    with get_conn(cfg.db_path) as conn:
+        prev_path = get_sync_note_path(conn, transcript.source, transcript.native_id)
+
     note_path = writer.write_note(cfg, transcript, insight)
     result["note_path"] = str(note_path)
+
+    if prev_path and prev_path != str(note_path) and os.path.exists(prev_path):
+        try:
+            os.remove(prev_path)
+        except OSError:
+            pass
+
     # Index the note we just wrote (parses it back → sqlite + embeddings).
     index_note(cfg, note_path, llm)
     with get_conn(cfg.db_path) as conn:
@@ -99,8 +128,18 @@ def sync(
     for source in sources:
         if verbose:
             print(f"[sync] source: {source}")
+
+        # Granola: incremental pull using a created_at high-water mark (unless forced).
+        created_after = None
+        if source == "granola" and not force:
+            with get_conn(cfg.db_path) as conn:
+                created_after = get_meta(conn, GRANOLA_HIGH_WATER)
+        max_sort = created_after or ""
+
         try:
-            for t in _iter_source(cfg, source, limit):
+            for t in _iter_source(cfg, source, limit, created_after):
+                if t.remote_sort_key and t.remote_sort_key > max_sort:
+                    max_sort = t.remote_sort_key
                 if not force and not dry_run:
                     with get_conn(cfg.db_path) as conn:
                         prev = get_sync_hash(conn, t.source, t.native_id)
@@ -118,6 +157,11 @@ def sync(
         except Exception as e:  # noqa: BLE001 - a whole source failing (e.g. Granola auth)
             errors.append({"source": source, "error": str(e)})
             print(f"[sync] source {source} failed: {e}", file=sys.stderr)
+
+        # Advance the Granola high-water mark after a successful, non-dry pass.
+        if source == "granola" and not dry_run and max_sort and max_sort != (created_after or ""):
+            with get_conn(cfg.db_path) as conn:
+                set_meta(conn, GRANOLA_HIGH_WATER, max_sort)
 
     if not dry_run and processed:
         writer.rebuild_indexes(cfg)

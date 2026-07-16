@@ -1,13 +1,13 @@
-"""Granola connector.
+"""Granola connector — official public API (https://public-api.granola.ai/v1).
 
-Granola encrypts its local cache + auth token, so we pull from Granola's cloud
-API using a bearer token the user pastes into config.toml ([granola] token).
+Auth: `Authorization: Bearer grn_...` (an API key created in the Granola desktop
+app, Business plan). The key goes in config.toml `[granola] token`.
 
-Endpoints (Granola's private API, as used by community tools):
-  POST {api_base}/v2/get-documents           -> list documents (paginated)
-  POST {api_base}/v1/get-document-transcript -> transcript segments for a document
+Endpoints:
+  GET /notes                     -> list notes (cursor pagination; created_after filter)
+  GET /notes/{id}?include=transcript -> note detail incl. transcript + summary_markdown
 
-If Granola changes these, adjust here; everything else is source-agnostic.
+Only notes that have a generated summary + transcript are returned by the API.
 """
 from __future__ import annotations
 
@@ -24,21 +24,9 @@ class GranolaAuthError(RuntimeError):
     pass
 
 
-def _headers(token: str) -> dict:
-    return {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-        "Accept": "*/*",
-        "User-Agent": "transcript-analyzer/0.1 (personal)",
-        "X-Client-Type": "electron",
-    }
-
-
-def _parse_dt(val) -> date:
+def _parse_date(val) -> date:
     if not val:
         return date.today()
-    if isinstance(val, (int, float)):
-        return datetime.fromtimestamp(val / 1000 if val > 1e12 else val).date()
     s = str(val).replace("Z", "+00:00")
     try:
         return datetime.fromisoformat(s).date()
@@ -46,33 +34,20 @@ def _parse_dt(val) -> date:
         return date.today()
 
 
-def _prosemirror_text(node) -> str:
-    """Flatten a ProseMirror/Granola notes document into plain text."""
-    if node is None:
-        return ""
-    if isinstance(node, str):
-        return node
-    parts: list[str] = []
-    if isinstance(node, dict):
-        if node.get("type") == "text" and "text" in node:
-            parts.append(node["text"])
-        for child in node.get("content", []) or []:
-            parts.append(_prosemirror_text(child))
-        if node.get("type") in ("paragraph", "heading", "listItem", "bulletList"):
-            parts.append("\n")
-    elif isinstance(node, list):
-        for child in node:
-            parts.append(_prosemirror_text(child))
-    return "".join(parts)
-
-
 class GranolaClient:
     def __init__(self, cfg: Config) -> None:
         if not cfg.granola.enabled:
-            raise GranolaAuthError("No Granola token configured ([granola] token in config.toml).")
+            raise GranolaAuthError("No Granola API key configured ([granola] token in config.toml).")
         self.cfg = cfg
         self.base = cfg.granola.api_base.rstrip("/")
-        self._client = httpx.Client(headers=_headers(cfg.granola.token), timeout=60)
+        self._client = httpx.Client(
+            headers={
+                "Authorization": f"Bearer {cfg.granola.token}",
+                "Accept": "application/json",
+                "User-Agent": "transcript-analyzer/0.1",
+            },
+            timeout=60,
+        )
 
     def close(self) -> None:
         self._client.close()
@@ -83,99 +58,125 @@ class GranolaClient:
     def __exit__(self, *exc) -> None:
         self.close()
 
-    def _post(self, path: str, body: dict) -> dict:
-        r = self._client.post(f"{self.base}{path}", json=body)
+    def _get(self, path: str, params: Optional[dict] = None) -> dict:
+        r = self._client.get(f"{self.base}{path}", params=params or {})
         if r.status_code in (401, 403):
             raise GranolaAuthError(
-                f"Granola API returned {r.status_code} — token missing/expired. "
-                "Re-paste your token into config.toml."
+                f"Granola API returned {r.status_code} — API key missing/invalid/expired. "
+                "Check [granola] token in config.toml."
             )
+        if r.status_code == 429:
+            raise RuntimeError("Granola API rate limit (429). Try again later or sync less often.")
         r.raise_for_status()
         return r.json()
 
-    def list_documents(self, limit: int = 100, offset: int = 0) -> list[dict]:
-        data = self._post("/v2/get-documents", {"limit": limit, "offset": offset})
-        # Response shape varies; try common keys.
-        if isinstance(data, list):
-            return data
-        for key in ("docs", "documents", "data"):
-            if isinstance(data.get(key), list):
-                return data[key]
-        return []
+    def list_notes(self, created_after: Optional[str] = None) -> Iterator[dict]:
+        """Yield note metadata objects across all pages (newest-first per API)."""
+        cursor: Optional[str] = None
+        while True:
+            params: dict = {}
+            if created_after:
+                params["created_after"] = created_after
+            if cursor:
+                params["cursor"] = cursor
+            data = self._get("/notes", params)
+            for note in data.get("notes", []) or []:
+                yield note
+            if not data.get("hasMore"):
+                break
+            cursor = data.get("cursor")
+            if not cursor:
+                break
 
-    def transcript_text(self, doc_id: str) -> str:
-        try:
-            data = self._post("/v1/get-document-transcript", {"document_id": doc_id})
-        except httpx.HTTPError:
-            return ""
-        segments = data if isinstance(data, list) else data.get("segments", [])
+    def get_note(self, note_id: str) -> dict:
+        return self._get(f"/notes/{note_id}", {"include": "transcript"})
+
+    # ---------- normalization ----------
+
+    @staticmethod
+    def _participants(detail: dict) -> list[str]:
+        names: list[str] = []
+        seen = set()
+
+        def add(n: Optional[str]) -> None:
+            n = (n or "").strip()
+            if n and n.lower() not in seen:
+                seen.add(n.lower())
+                names.append(n)
+
+        for att in detail.get("attendees") or []:
+            if isinstance(att, dict):
+                add(att.get("name") or att.get("email"))
+            elif isinstance(att, str):
+                add(att)
+        # Fall back to / augment with speaker names from the transcript.
+        for seg in detail.get("transcript") or []:
+            sp = seg.get("speaker") if isinstance(seg, dict) else None
+            if isinstance(sp, dict):
+                add(sp.get("name"))
+        return names
+
+    @staticmethod
+    def _transcript_text(detail: dict) -> str:
+        segments = detail.get("transcript") or []
         lines: list[str] = []
-        for seg in segments or []:
+        prev = None
+        for seg in segments:
             if not isinstance(seg, dict):
                 continue
-            speaker = seg.get("speaker") or seg.get("source") or ""
             text = (seg.get("text") or "").strip()
             if not text:
                 continue
-            lines.append(f"{speaker}: {text}" if speaker else text)
-        return "\n".join(lines)
-
-    def _people(self, doc: dict) -> list[str]:
-        out: list[str] = []
-        people = doc.get("people") or doc.get("attendees") or []
-        for p in people:
-            if isinstance(p, dict):
-                name = p.get("name") or p.get("display_name") or p.get("email")
-                if name:
-                    out.append(str(name))
-            elif isinstance(p, str):
-                out.append(p)
-        return out
-
-    def to_transcript(self, doc: dict) -> Optional[Transcript]:
-        doc_id = doc.get("id") or doc.get("document_id")
-        if not doc_id:
-            return None
-        title = doc.get("title") or doc.get("name") or "Untitled Granola note"
-        when = _parse_dt(doc.get("created_at") or doc.get("created") or doc.get("date"))
-
-        # Prefer the spoken transcript; fall back to the note body (notes / last_viewed_panel).
-        text = self.transcript_text(str(doc_id))
+            sp = seg.get("speaker") or {}
+            name = (sp.get("name") if isinstance(sp, dict) else None) or ""
+            if name and name != prev:
+                lines.append(f"{name}: {text}")
+                prev = name
+            else:
+                lines.append(text)
+        text = "\n".join(lines).strip()
         if not text:
-            notes = doc.get("notes") or doc.get("notes_markdown") or doc.get("content")
-            text = _prosemirror_text(notes) if isinstance(notes, (dict, list)) else (notes or "")
-        text = (text or "").strip()
+            # No spoken transcript available — fall back to Granola's own summary.
+            text = (detail.get("summary_markdown") or detail.get("summary_text") or "").strip()
+        return text
+
+    def to_transcript(self, detail: dict) -> Optional[Transcript]:
+        note_id = detail.get("id")
+        if not note_id:
+            return None
+        text = self._transcript_text(detail)
         if not text:
             return None
-
+        created = detail.get("created_at") or detail.get("updated_at")
         return Transcript(
-            id=stable_id("granola", str(doc_id)),
+            id=stable_id("granola", str(note_id)),
             source="granola",
-            native_id=str(doc_id),
-            title=str(title).strip(),
-            date=when,
-            participants=self._people(doc),
+            native_id=str(note_id),
+            title=(detail.get("title") or "Untitled Granola note").strip(),
+            date=_parse_date(created),
+            participants=self._participants(detail),
             text=text,
-            source_ref=str(doc_id),
+            source_ref=detail.get("web_url") or str(note_id),
+            remote_sort_key=str(created or ""),
         )
 
 
-def iter_transcripts(cfg: Config, limit: Optional[int] = None) -> Iterator[Transcript]:
+def iter_transcripts(
+    cfg: Config,
+    limit: Optional[int] = None,
+    created_after: Optional[str] = None,
+) -> Iterator[Transcript]:
     with GranolaClient(cfg) as client:
         fetched = 0
-        offset = 0
-        page_size = 100
-        while True:
-            docs = client.list_documents(limit=page_size, offset=offset)
-            if not docs:
-                break
-            for doc in docs:
-                t = client.to_transcript(doc)
-                if t is not None:
-                    yield t
-                    fetched += 1
-                    if limit is not None and fetched >= limit:
-                        return
-            if len(docs) < page_size:
-                break
-            offset += page_size
+        for note in client.list_notes(created_after=created_after):
+            note_id = note.get("id")
+            if not note_id:
+                continue
+            detail = client.get_note(str(note_id))
+            t = client.to_transcript(detail)
+            if t is None:
+                continue
+            yield t
+            fetched += 1
+            if limit is not None and fetched >= limit:
+                return

@@ -19,7 +19,7 @@ Pocket folder ┘   (insights + category)  └─> SQLite + embeddings (derived 
 ```
 
 - **Pocket AI** already writes markdown into a vault folder (`Pocket AI Recordings`) — we read it.
-- **Granola** encrypts its local data, so we pull via its cloud API using a token you paste once.
+- **Granola** is pulled via its **official public API** (`public-api.granola.ai/v1`) using an API key.
 - Insight notes are written to `Transcript Insights/<Category>/…` in your vault (the canonical store).
 - A SQLite + embedding index is rebuilt *by parsing those notes*, so the dashboard uses your vault.
 
@@ -36,7 +36,8 @@ Edit `config.toml`:
 - `[vault] path` / `name` — your Obsidian vault (defaults point at `~/Documents/Obsidian Vault`).
 - `[ollama] chat_model` — recommend `ollama pull qwen2.5:7b-instruct` for better insights
   (a 3B model works but is weaker). `embed_model` stays `nomic-embed-text`.
-- `[granola] token` — paste your Granola bearer token to enable Granola sync (leave blank to skip).
+- `[granola] token` — paste your Granola **API key** (starts with `grn_`) to enable Granola sync
+  (leave blank to skip). Create one in the Granola desktop app (Business plan).
 
 Make sure Ollama is running and has the models:
 
@@ -82,7 +83,8 @@ bash scripts/install_launchd.sh uninstall
 
 ## Notes
 
-- **Granola API**: the connector targets Granola's private endpoints (`/v2/get-documents`,
-  `/v1/get-document-transcript`). If Granola changes them, adjust `connectors/granola.py`.
+- **Granola API**: uses the official public API — `GET /notes` (cursor pagination, `created_after`
+  filter) and `GET /notes/{id}?include=transcript`. Sync is incremental via a `created_at`
+  high-water mark stored in the `meta` table (`--force` ignores it for a full resync).
 - The category taxonomy grows automatically; near-duplicate proposals are merged by embedding
   similarity (`[taxonomy] merge_threshold`).

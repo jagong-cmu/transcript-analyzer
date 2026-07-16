@@ -31,6 +31,7 @@ class Transcript(BaseModel):
     participants: list[str] = Field(default_factory=list)
     text: str
     source_ref: str = ""  # granola doc id, or absolute vault file path
+    remote_sort_key: str = ""  # e.g. Granola created_at ISO, for incremental high-water marks
 
     @property
     def hash(self) -> str:
