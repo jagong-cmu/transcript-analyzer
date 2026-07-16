@@ -32,8 +32,12 @@ def retrieve(cfg: Config, question: str, llm: LLM, k: int = 6) -> list[Retrieved
         if not rows:
             return []
         qv = llm.embed_one(question)
-        mat = np.vstack([r[3] for r in rows])
-        sims = mat @ qv  # embeddings are normalized -> cosine similarity
+        mat = np.ascontiguousarray(np.vstack([r[3] for r in rows]), dtype=np.float32)
+        qv = np.ascontiguousarray(np.nan_to_num(qv), dtype=np.float32)
+        # float32 matmul can emit spurious FP warnings on some BLAS builds
+        # (Apple Silicon); data is verified finite, so silence them here.
+        with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+            sims = mat @ qv  # embeddings are normalized -> cosine similarity
         top_idx = np.argsort(-sims)[: max(k * 3, k)]
 
         # Keep the best chunk per transcript, then take top-k transcripts.
