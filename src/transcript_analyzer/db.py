@@ -59,9 +59,11 @@ CREATE TABLE IF NOT EXISTS meta (
 
 def connect(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 30000")  # wait out concurrent writers
+    conn.execute("PRAGMA journal_mode = WAL")     # better concurrent read/write
     conn.executescript(SCHEMA)
     return conn
 
