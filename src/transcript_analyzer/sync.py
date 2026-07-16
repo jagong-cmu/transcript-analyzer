@@ -24,7 +24,9 @@ from .db import (
 )
 from .models import Transcript
 
-GRANOLA_HIGH_WATER = "granola_last_created_at"
+
+def _high_water_key(source: str) -> str:
+    return f"{source}_last_created_at"
 from .obsidian import writer
 from .pipeline.categorize import Taxonomy
 from .pipeline.indexer import index_note
@@ -43,7 +45,12 @@ def _iter_source(
     created_after: Optional[str] = None,
 ) -> Iterable[Transcript]:
     if source == "pocket":
-        yield from _limited(pocket.iter_transcripts(cfg), limit)
+        if cfg.pocket.api_enabled:
+            from .connectors import pocket_api  # lazy (needs API key)
+
+            yield from pocket_api.iter_transcripts(cfg, limit=limit, created_after=created_after)
+        else:
+            yield from _limited(pocket.iter_transcripts(cfg), limit)
     elif source == "granola":
         from .connectors import granola  # imported lazily (needs token)
 
@@ -129,11 +136,11 @@ def sync(
         if verbose:
             print(f"[sync] source: {source}")
 
-        # Granola: incremental pull using a created_at high-water mark (unless forced).
+        # Incremental pull using a per-source created_at high-water mark (unless forced).
         created_after = None
-        if source == "granola" and not force:
+        if not force:
             with get_conn(cfg.db_path) as conn:
-                created_after = get_meta(conn, GRANOLA_HIGH_WATER)
+                created_after = get_meta(conn, _high_water_key(source))
         max_sort = created_after or ""
 
         try:
@@ -158,10 +165,10 @@ def sync(
             errors.append({"source": source, "error": str(e)})
             print(f"[sync] source {source} failed: {e}", file=sys.stderr)
 
-        # Advance the Granola high-water mark after a successful, non-dry pass.
-        if source == "granola" and not dry_run and max_sort and max_sort != (created_after or ""):
+        # Advance the source's high-water mark after a successful, non-dry pass.
+        if not dry_run and max_sort and max_sort != (created_after or ""):
             with get_conn(cfg.db_path) as conn:
-                set_meta(conn, GRANOLA_HIGH_WATER, max_sort)
+                set_meta(conn, _high_water_key(source), max_sort)
 
     if not dry_run and processed:
         writer.rebuild_indexes(cfg)

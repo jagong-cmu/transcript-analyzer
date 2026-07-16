@@ -10,8 +10,13 @@ name = "Obsidian Vault"
 insights_folder = "Transcript Insights"
 
 [pocket]
-# Folder (relative to the vault) that Pocket AI writes its recordings into.
+# Folder (relative to the vault) that Pocket writes recordings into (fallback source,
+# used only when api_key below is empty).
 folder = "Pocket AI Recordings"
+# Pocket API key (starts with pk_) from heypocket.com -> Settings -> Developer -> API Keys.
+# When set, transcripts are pulled from the Pocket API instead of the folder.
+api_key = ""
+api_base = "https://public.heypocketai.com/api/v1"
 
 [granola]
 # Paste your Granola API key (starts with grn_) to enable Granola sync.

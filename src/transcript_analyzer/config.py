@@ -30,6 +30,12 @@ class VaultConfig:
 @dataclass(frozen=True)
 class PocketConfig:
     folder: str
+    api_key: str = ""
+    api_base: str = "https://public.heypocketai.com/api/v1"
+
+    @property
+    def api_enabled(self) -> bool:
+        return bool(self.api_key.strip())
 
 
 @dataclass(frozen=True)
@@ -113,7 +119,12 @@ def load_config() -> Config:
         name=vault_raw["name"],
         insights_folder=vault_raw.get("insights_folder", "Transcript Insights"),
     )
-    pocket = PocketConfig(folder=raw["pocket"]["folder"])
+    pocket_raw = raw["pocket"]
+    pocket = PocketConfig(
+        folder=pocket_raw["folder"],
+        api_key=pocket_raw.get("api_key", ""),
+        api_base=pocket_raw.get("api_base", "https://public.heypocketai.com/api/v1"),
+    )
     granola_raw = raw.get("granola", {})
     granola = GranolaConfig(
         token=granola_raw.get("token", ""),
