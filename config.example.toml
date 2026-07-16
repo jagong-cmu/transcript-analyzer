@@ -21,9 +21,9 @@ api_base = "https://api.granola.ai"
 
 [ollama]
 host = "http://localhost:11434"
-# Chat model for insights + Q&A. Recommend `ollama pull qwen2.5:7b-instruct`.
-# Falls back gracefully; qwen2.5:3b works if that's all you have.
-chat_model = "qwen2.5:3b"
+# Chat model for insights + Q&A. `ollama pull qwen2.5:7b-instruct` recommended.
+# qwen2.5:3b works too but mis-categorizes more often.
+chat_model = "qwen2.5:7b-instruct"
 embed_model = "nomic-embed-text"
 # Request timeout (seconds) for a single LLM call.
 timeout = 600
