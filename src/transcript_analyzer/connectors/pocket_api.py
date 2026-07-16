@@ -11,6 +11,7 @@ Preferred over the vault-folder connector when an API key is configured.
 """
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
 from typing import Iterator, Optional
 
@@ -88,24 +89,38 @@ class PocketClient:
     # ---------- normalization ----------
 
     @staticmethod
+    def _speaker_label(speaker) -> str:
+        """Map Pocket's diarization labels to readable names; pass real names through."""
+        if not speaker:
+            return ""
+        m = re.match(r"^SPEAKER_(\d+)$", str(speaker))
+        return f"Speaker {int(m.group(1)) + 1}" if m else str(speaker).strip()
+
+    @staticmethod
     def _transcript_text(detail: dict) -> str:
         tr = detail.get("transcript") or {}
         if isinstance(tr, dict):
-            # Prefer the flat text; fall back to joining diarized segments.
-            text = (tr.get("text") or "").strip()
-            if text:
-                return text
-            lines = []
+            # Prefer diarized segments so each turn is attributed to a speaker.
+            lines: list[str] = []
+            prev = None
             for seg in tr.get("segments") or []:
                 if not isinstance(seg, dict):
                     continue
                 t = (seg.get("text") or "").strip()
                 if not t:
                     continue
-                sp = seg.get("speaker") or ""
-                lines.append(f"{sp}: {t}" if sp else t)
+                name = PocketClient._speaker_label(seg.get("speaker"))
+                if name and name != prev:
+                    lines.append(f"{name}: {t}")
+                    prev = name
+                else:
+                    lines.append(t)
             if lines:
                 return "\n".join(lines)
+            # No diarization for this recording — fall back to flat text.
+            flat = (tr.get("text") or "").strip()
+            if flat:
+                return flat
         # Last resort: a Pocket summary.
         summ = detail.get("summarizations")
         if isinstance(summ, dict):
