@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from transcript_analyzer.pipeline.organize import categorize  # noqa: E402
+from transcript_analyzer.pipeline.organize import categorize, reset_categories  # noqa: E402
 
 
 def _parse_categories(argv: list[str]) -> list[str]:
@@ -25,10 +25,14 @@ def _parse_categories(argv: list[str]) -> list[str]:
 
 
 def main() -> int:
-    cats = _parse_categories(sys.argv[1:])
+    argv = sys.argv[1:]
+    if argv and argv[0] in ("--reset", "-r"):
+        reset_categories()
+        return 0
+    cats = _parse_categories(argv)
     if not cats:
         print(__doc__)
-        print("ERROR: provide at least one category.")
+        print("Provide categories, or --reset to clear all categories.")
         return 2
     print(f"[categorize] categories: {cats}")
     categorize(categories=cats)

@@ -97,6 +97,24 @@ def _clear_old_mocs(cfg: Config) -> None:
             p.unlink()
 
 
+def reset_categories(cfg: Optional[Config] = None, verbose: bool = True) -> dict:
+    """Remove all category assignments and MOC notes. Notes stay date-organized."""
+    import shutil
+
+    cfg = cfg or load_config()
+    cats_dir = cfg.vault.insights_path / CATEGORIES_SUBDIR
+    removed = 0
+    if cats_dir.exists():
+        removed = len(list(cats_dir.glob("*.md")))
+        shutil.rmtree(cats_dir, ignore_errors=True)
+    with get_conn(cfg.db_path) as conn:
+        cleared = conn.execute("SELECT COUNT(*) FROM note_categories").fetchone()[0]
+        clear_note_categories(conn)
+    if verbose:
+        print(f"[reset] removed {removed} category note(s), cleared {cleared} assignment(s)")
+    return {"mocs_removed": removed, "assignments_cleared": cleared}
+
+
 def categorize(
     cfg: Optional[Config] = None,
     categories: Optional[list[str]] = None,
