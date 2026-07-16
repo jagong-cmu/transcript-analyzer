@@ -26,6 +26,9 @@ Pocket folder ┘   (insights + category)  └─> SQLite + embeddings (derived 
   the local LLM sorts notes into non-destructive **Category index notes** (`Transcript Insights/
   Categories/`). Notes never move; categories are an overlay.
 - A SQLite + embedding index is rebuilt *by parsing those notes*, so the dashboard uses your vault.
+- **Pocket audio** is downloaded into `Transcript Insights/Attachments/` and embedded in each note
+  (playable inline in Obsidian and via a player on the dashboard). Toggle with `[pocket]
+  download_audio`. Granola's API exposes no audio, so Granola notes are transcript-only.
 
 ## Setup
 
