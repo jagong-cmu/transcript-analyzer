@@ -20,6 +20,16 @@ from ..config import Config
 from ..models import Insight, Transcript
 
 CATEGORIES_SUBDIR = "Categories"
+ATTACHMENTS_SUBDIR = "Attachments"
+
+
+def attachments_dir(cfg: Config) -> Path:
+    return cfg.vault.insights_path / ATTACHMENTS_SUBDIR
+
+
+def audio_path_for(cfg: Config, note_path: Path) -> Path:
+    """Where the audio for a given note note lives (matches the note's stem)."""
+    return attachments_dir(cfg) / f"{note_path.stem}.mp3"
 
 
 def _safe_filename(title: str, when: str) -> str:
@@ -68,7 +78,7 @@ def note_path_for(cfg: Config, transcript: Transcript, insight: Insight) -> Path
     return base
 
 
-def render_note(transcript: Transcript, insight: Insight) -> str:
+def render_note(transcript: Transcript, insight: Insight, audio_name: str | None = None) -> str:
     people_links = [_wikilink(p) for p in insight.people]
 
     fm_lines = ["---"]
@@ -93,6 +103,10 @@ def render_note(transcript: Transcript, insight: Insight) -> str:
         body.append("**People:** " + ", ".join(people_links))
     body.append(f"**Source:** {transcript.source}  ·  **Date:** {transcript.date.isoformat()}")
     body.append("")
+    if audio_name:
+        body.append("## Recording")
+        body.append(f"![[{audio_name}]]")
+        body.append("")
     body.append("## Summary")
     body.append(insight.summary or "_No summary._")
     body.append("")
@@ -113,10 +127,12 @@ def render_note(transcript: Transcript, insight: Insight) -> str:
     return "\n".join(fm_lines) + "\n\n" + "\n".join(body)
 
 
-def write_note(cfg: Config, transcript: Transcript, insight: Insight) -> Path:
+def write_note(
+    cfg: Config, transcript: Transcript, insight: Insight, audio_name: str | None = None
+) -> Path:
     path = note_path_for(cfg, transcript, insight)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_note(transcript, insight), encoding="utf-8")
+    path.write_text(render_note(transcript, insight, audio_name=audio_name), encoding="utf-8")
     return path
 
 

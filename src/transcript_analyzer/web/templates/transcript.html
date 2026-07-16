@@ -10,6 +10,12 @@
   </p>
 </div>
 
+{% if has_audio %}
+<section>
+  <audio controls preload="none" style="width:100%" src="/audio/{{ rec.transcript_id }}"></audio>
+</section>
+{% endif %}
+
 {% if rec.people %}
 <p><strong>People:</strong>
   {% for p in rec.people %}<span class="pill soft">{{ p }}</span>{% endfor %}

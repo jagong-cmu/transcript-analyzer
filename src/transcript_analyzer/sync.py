@@ -68,6 +68,22 @@ def _limited(it: Iterable[Transcript], limit: Optional[int]) -> Iterable[Transcr
         yield x
 
 
+def _maybe_download_audio(cfg: Config, transcript: Transcript, insight) -> Optional[str]:
+    """Download a Pocket recording's audio into the vault. Returns the filename to embed."""
+    if transcript.source != "pocket" or not cfg.pocket.download_audio:
+        return None
+    from .connectors.pocket_api import PocketClient  # lazy (needs key)
+
+    prospective = writer.note_path_for(cfg, transcript, insight)
+    dest = writer.audio_path_for(cfg, prospective)
+    try:
+        with PocketClient(cfg) as pc:
+            got = pc.download_audio(transcript.native_id, dest)
+    except Exception:  # noqa: BLE001 - audio is best-effort, never fail the note
+        return None
+    return dest.name if got else None
+
+
 def process_transcript(
     cfg: Config,
     transcript: Transcript,
@@ -90,7 +106,10 @@ def process_transcript(
     with get_conn(cfg.db_path) as conn:
         prev_path = get_sync_note_path(conn, transcript.source, transcript.native_id)
 
-    note_path = writer.write_note(cfg, transcript, insight)
+    # Download the recording's audio into the vault (Pocket only) and embed it.
+    audio_name = _maybe_download_audio(cfg, transcript, insight)
+
+    note_path = writer.write_note(cfg, transcript, insight, audio_name=audio_name)
     result["note_path"] = str(note_path)
 
     if prev_path and prev_path != str(note_path) and os.path.exists(prev_path):

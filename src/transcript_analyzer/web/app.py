@@ -6,9 +6,11 @@ from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+
+from ..obsidian import writer
 
 from ..config import load_config
 from collections import defaultdict
@@ -93,12 +95,25 @@ def transcript(request: Request, tid: str):
         note_cats = categories_for(conn, tid) if rec else []
     if rec is None:
         return HTMLResponse("Not found", status_code=404)
+    has_audio = writer.audio_path_for(cfg, Path(rec.note_path)).exists() if rec.note_path else False
     return templates.TemplateResponse(
         request,
         "transcript.html",
         {"rec": rec, "categories": cats, "note_categories": note_cats,
-         "obsidian_url": obsidian_uri(rec.note_path)},
+         "obsidian_url": obsidian_uri(rec.note_path), "has_audio": has_audio},
     )
+
+
+@app.get("/audio/{tid}")
+def audio(tid: str):
+    with get_conn(cfg.db_path) as conn:
+        rec = get_transcript(conn, tid)
+    if rec is None or not rec.note_path:
+        return HTMLResponse("Not found", status_code=404)
+    path = writer.audio_path_for(cfg, Path(rec.note_path))
+    if not path.exists():
+        return HTMLResponse("No audio", status_code=404)
+    return FileResponse(str(path), media_type="audio/mpeg", filename=path.name)
 
 
 @app.get("/chat", response_class=HTMLResponse)

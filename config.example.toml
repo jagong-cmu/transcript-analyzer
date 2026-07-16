@@ -17,6 +17,9 @@ folder = "Pocket AI Recordings"
 # When set, transcripts are pulled from the Pocket API instead of the folder.
 api_key = ""
 api_base = "https://public.heypocketai.com/api/v1"
+# Download each recording's audio into the vault (Transcript Insights/Attachments/) during sync,
+# and embed a player in the note. Set false to keep transcripts only. (Granola has no audio API.)
+download_audio = true
 
 [granola]
 # Paste your Granola API key (starts with grn_) to enable Granola sync.

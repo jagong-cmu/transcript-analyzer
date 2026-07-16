@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime
+from pathlib import Path
 from typing import Iterator, Optional
 
 import httpx
@@ -85,6 +86,36 @@ class PocketClient:
     def get_recording(self, rec_id: str) -> dict:
         data = self._get(f"/public/recordings/{rec_id}")
         return data.get("data", data)
+
+    def audio_url(self, rec_id: str) -> Optional[str]:
+        """Return a short-lived signed URL to the recording's audio, or None."""
+        try:
+            data = self._get(f"/public/recordings/{rec_id}/audio-url")
+        except Exception:  # noqa: BLE001
+            return None
+        d = data.get("data", data) if isinstance(data, dict) else {}
+        return d.get("signed_url") if isinstance(d, dict) else None
+
+    def download_audio(self, rec_id: str, dest: "Path") -> Optional["Path"]:
+        """Download the recording's audio to `dest`. Returns the path, or None."""
+        if dest.exists() and dest.stat().st_size > 0:
+            return dest  # already downloaded
+        url = self.audio_url(rec_id)
+        if not url:
+            return None
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_suffix(dest.suffix + ".part")
+        try:
+            with httpx.stream("GET", url, timeout=300, follow_redirects=True) as r:
+                r.raise_for_status()
+                with open(tmp, "wb") as f:
+                    for chunk in r.iter_bytes(chunk_size=1 << 16):
+                        f.write(chunk)
+            tmp.replace(dest)
+            return dest
+        except Exception:  # noqa: BLE001
+            tmp.unlink(missing_ok=True)
+            return None
 
     # ---------- normalization ----------
 

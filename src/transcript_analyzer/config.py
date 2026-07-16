@@ -32,6 +32,7 @@ class PocketConfig:
     folder: str
     api_key: str = ""
     api_base: str = "https://public.heypocketai.com/api/v1"
+    download_audio: bool = True
 
     @property
     def api_enabled(self) -> bool:
@@ -124,6 +125,7 @@ def load_config() -> Config:
         folder=pocket_raw["folder"],
         api_key=pocket_raw.get("api_key", ""),
         api_base=pocket_raw.get("api_base", "https://public.heypocketai.com/api/v1"),
+        download_audio=bool(pocket_raw.get("download_audio", True)),
     )
     granola_raw = raw.get("granola", {})
     granola = GranolaConfig(
