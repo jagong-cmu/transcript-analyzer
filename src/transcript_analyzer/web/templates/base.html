@@ -21,7 +21,7 @@
       {% for name, count in categories %}
         <li><a href="/category/{{ name | urlencode }}">{{ name }} <span class="badge">{{ count }}</span></a></li>
       {% else %}
-        <li class="muted">No categories yet.</li>
+        <li class="muted hint">None yet. Run<br><code>scripts/categorize.py</code><br>to create categories.</li>
       {% endfor %}
     </ul>
   </aside>

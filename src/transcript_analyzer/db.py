@@ -54,6 +54,16 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
+
+-- On-demand category assignments (populated by the `categorize` command).
+-- A note may belong to multiple categories.
+CREATE TABLE IF NOT EXISTS note_categories (
+    transcript_id TEXT NOT NULL,
+    category      TEXT NOT NULL,
+    PRIMARY KEY (transcript_id, category),
+    FOREIGN KEY (transcript_id) REFERENCES transcripts(transcript_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_note_categories_cat ON note_categories(category);
 """
 
 
@@ -184,16 +194,39 @@ def get_transcript(conn: sqlite3.Connection, transcript_id: str) -> Optional[Not
 
 def transcripts_in_category(conn: sqlite3.Connection, category: str) -> list[NoteRecord]:
     rows = conn.execute(
-        "SELECT * FROM transcripts WHERE category = ? ORDER BY date DESC", (category,)
+        """SELECT t.* FROM transcripts t
+             JOIN note_categories nc ON nc.transcript_id = t.transcript_id
+            WHERE nc.category = ? ORDER BY t.date DESC""",
+        (category,),
     ).fetchall()
     return [_row_to_note(r) for r in rows]
 
 
 def category_counts(conn: sqlite3.Connection) -> list[tuple[str, int]]:
     rows = conn.execute(
-        "SELECT category, COUNT(*) AS n FROM transcripts GROUP BY category ORDER BY n DESC, category"
+        """SELECT category, COUNT(*) AS n FROM note_categories
+            GROUP BY category ORDER BY n DESC, category"""
     ).fetchall()
     return [(r["category"], r["n"]) for r in rows]
+
+
+def categories_for(conn: sqlite3.Connection, transcript_id: str) -> list[str]:
+    rows = conn.execute(
+        "SELECT category FROM note_categories WHERE transcript_id = ? ORDER BY category",
+        (transcript_id,),
+    ).fetchall()
+    return [r["category"] for r in rows]
+
+
+def clear_note_categories(conn: sqlite3.Connection) -> None:
+    conn.execute("DELETE FROM note_categories")
+
+
+def set_note_category(conn: sqlite3.Connection, transcript_id: str, category: str) -> None:
+    conn.execute(
+        "INSERT OR IGNORE INTO note_categories (transcript_id, category) VALUES (?, ?)",
+        (transcript_id, category),
+    )
 
 
 def load_all_chunk_embeddings(

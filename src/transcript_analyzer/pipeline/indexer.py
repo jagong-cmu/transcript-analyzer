@@ -87,7 +87,7 @@ def parse_note(path: Path) -> Optional[NoteRecord]:
         source=str(meta.get("source", "unknown")),
         title=path.stem,
         date=date_str,
-        category=str(meta.get("category", "Uncategorized")),
+        category="",  # categories are tracked separately (note_categories), not in note frontmatter
         people=people,
         topics=topics,
         action_items=action_items,
@@ -118,10 +118,11 @@ def _iter_note_paths(cfg: Config):
     if not root.exists():
         return
     hub = f"{cfg.vault.insights_folder}.md"
-    for cat_dir in sorted(p for p in root.iterdir() if p.is_dir()):
-        for note in sorted(cat_dir.glob("*.md")):
-            yield note
-    # MOC/hub notes at the top level are skipped (they have no transcript_id).
+    # Transcript notes are flat under root; skip the hub and the Categories/ MOC folder.
+    for note in sorted(root.glob("*.md")):
+        if note.name == hub:
+            continue
+        yield note
 
 
 def index_note(cfg: Config, path: Path, llm: Optional[LLM] = None) -> Optional[NoteRecord]:

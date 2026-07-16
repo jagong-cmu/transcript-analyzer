@@ -28,7 +28,6 @@ from .models import Transcript
 def _high_water_key(source: str) -> str:
     return f"{source}_last_created_at"
 from .obsidian import writer
-from .pipeline.categorize import Taxonomy
 from .pipeline.indexer import index_note
 from .pipeline.insights import extract_insight
 from .pipeline.llm import LLM
@@ -73,16 +72,14 @@ def process_transcript(
     cfg: Config,
     transcript: Transcript,
     llm: LLM,
-    taxonomy: Taxonomy,
     *,
     dry_run: bool = False,
 ) -> dict:
-    insight = extract_insight(transcript, cfg, llm=llm, taxonomy=taxonomy)
+    insight = extract_insight(transcript, cfg, llm=llm)
     result = {
         "id": transcript.id,
         "title": transcript.title,
         "source": transcript.source,
-        "category": insight.category,
         "note_path": None,
     }
     if dry_run:
@@ -124,7 +121,6 @@ def sync(
     cfg = cfg or load_config()
     sources = sources or _default_sources(cfg)
     llm = LLM(cfg)
-    taxonomy = Taxonomy(cfg, llm)
 
     health = llm.health()
     if not health["ok"]:
@@ -154,10 +150,10 @@ def sync(
                         skipped += 1
                         continue
                 try:
-                    res = process_transcript(cfg, t, llm, taxonomy, dry_run=dry_run)
+                    res = process_transcript(cfg, t, llm, dry_run=dry_run)
                     processed.append(res)
                     if verbose:
-                        print(f"  + [{res['category']}] {res['title']}")
+                        print(f"  + {res['title']}")
                 except Exception as e:  # noqa: BLE001 - one bad transcript shouldn't stop sync
                     errors.append({"id": t.id, "title": t.title, "error": str(e)})
                     print(f"  ! error on {t.title}: {e}", file=sys.stderr)

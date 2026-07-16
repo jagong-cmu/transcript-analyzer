@@ -1,13 +1,17 @@
 """Write insight notes into the Obsidian vault (the source of truth).
 
-Layout inside the vault:
-  <insights_folder>/                        e.g. "Transcript Insights"
-    <insights_folder>.md                     top-level hub (map of content)
-    <Category>.md                            per-category index (MOC)
-    <Category>/<YYYY-MM-DD> <title>.md        one note per transcript
+Notes are organized FLAT by recording date (date-prefixed filenames), NOT by
+category. Categories are created on demand via the `categorize` command, which
+writes non-destructive index (MOC) notes under `<insights_folder>/Categories/`.
+
+  <insights_folder>/
+    <insights_folder>.md                 hub, notes grouped by month
+    <YYYY-MM-DD> <title>.md              one note per transcript (flat)
+    Categories/<Category>.md             (created on demand by `categorize`)
 """
 from __future__ import annotations
 
+from collections import defaultdict
 from pathlib import Path
 
 from slugify import slugify
@@ -15,7 +19,7 @@ from slugify import slugify
 from ..config import Config
 from ..models import Insight, Transcript
 
-_TRANSCRIPT_HEADING = "## Transcript"
+CATEGORIES_SUBDIR = "Categories"
 
 
 def _safe_filename(title: str, when: str) -> str:
@@ -36,10 +40,32 @@ def _quote_block(text: str) -> str:
     return "\n".join(lines)
 
 
+def _existing_transcript_id(path: Path) -> str:
+    """Cheap read of the transcript_id from a note's frontmatter, if present."""
+    try:
+        fences = 0
+        for ln in path.read_text(encoding="utf-8").splitlines():
+            if ln.strip() == "---":
+                fences += 1
+                if fences >= 2:
+                    break
+                continue
+            if ln.startswith("transcript_id:"):
+                return ln.split(":", 1)[1].strip()
+    except OSError:
+        return ""
+    return ""
+
+
 def note_path_for(cfg: Config, transcript: Transcript, insight: Insight) -> Path:
-    category = insight.category or "Uncategorized"
-    fname = _safe_filename(transcript.title, transcript.date.isoformat())
-    return cfg.vault.insights_path / category / fname
+    root = cfg.vault.insights_path
+    base = root / _safe_filename(transcript.title, transcript.date.isoformat())
+    # Guarantee uniqueness: if a DIFFERENT transcript already owns this filename
+    # (two titles that slugify identically on the same date), append a short id.
+    if base.exists() and _existing_transcript_id(base) not in ("", transcript.id):
+        stem = base.stem
+        return root / f"{stem} ({transcript.id[:6]}).md"
+    return base
 
 
 def render_note(transcript: Transcript, insight: Insight) -> str:
@@ -48,7 +74,6 @@ def render_note(transcript: Transcript, insight: Insight) -> str:
     fm_lines = ["---"]
     fm_lines.append(f"source: {transcript.source}")
     fm_lines.append(f"date: {transcript.date.isoformat()}")
-    fm_lines.append(f'category: "{insight.category}"')
     fm_lines.append(f"transcript_id: {transcript.id}")
     fm_lines.append("people:")
     for p in people_links:
@@ -81,7 +106,7 @@ def render_note(transcript: Transcript, insight: Insight) -> str:
         body.append("## Topics")
         body.append(" ".join(f"#{slugify(t)}" for t in insight.topics))
         body.append("")
-    body.append(_TRANSCRIPT_HEADING)
+    body.append("## Transcript")
     body.append(_quote_block(transcript.text))
     body.append("")
 
@@ -96,30 +121,24 @@ def write_note(cfg: Config, transcript: Transcript, insight: Insight) -> Path:
 
 
 def rebuild_indexes(cfg: Config) -> None:
-    """Regenerate the hub note + per-category MOC notes from the notes on disk."""
+    """Regenerate the hub note listing all transcript notes grouped by month."""
     root = cfg.vault.insights_path
     if not root.exists():
         return
     folder = cfg.vault.insights_folder
 
-    categories: dict[str, list[Path]] = {}
-    for cat_dir in sorted(p for p in root.iterdir() if p.is_dir()):
-        notes = sorted(cat_dir.glob("*.md"))
-        if notes:
-            categories[cat_dir.name] = notes
+    # Flat transcript notes live directly under root (skip the hub + Categories/).
+    notes = [p for p in root.glob("*.md") if p.stem != folder]
+    by_month: dict[str, list[Path]] = defaultdict(list)
+    for n in notes:
+        # filename starts with YYYY-MM-DD
+        month = n.stem[:7] if len(n.stem) >= 7 and n.stem[4] == "-" else "undated"
+        by_month[month].append(n)
 
-    # Per-category MOC notes.
-    for cat, notes in categories.items():
-        lines = [f"# {cat}", "", f"_{len(notes)} conversation(s)._", ""]
-        for n in notes:
-            lines.append(f"- [[{n.stem}]]")
-        (root / f"{cat}.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-    # Top-level hub note.
-    hub = [f"# {folder}", "", "Auto-generated index of transcript insights.", ""]
-    total = sum(len(v) for v in categories.values())
-    hub.append(f"_{total} conversation(s) across {len(categories)} categories._")
-    hub.append("")
-    for cat, notes in sorted(categories.items(), key=lambda kv: (-len(kv[1]), kv[0])):
-        hub.append(f"- [[{cat}]] ({len(notes)})")
+    hub = [f"# {folder}", "", f"_{len(notes)} conversation(s), organized by date._", ""]
+    for month in sorted(by_month, reverse=True):
+        hub.append(f"## {month}")
+        for n in sorted(by_month[month], reverse=True):
+            hub.append(f"- [[{n.stem}]]")
+        hub.append("")
     (root / f"{folder}.md").write_text("\n".join(hub) + "\n", encoding="utf-8")

@@ -46,7 +46,7 @@ class Insight(BaseModel):
     action_items: list[str] = Field(default_factory=list)
     people: list[str] = Field(default_factory=list)
     topics: list[str] = Field(default_factory=list)
-    category: str = "Uncategorized"
+    category: str = ""  # unused during ingestion; categories are assigned on demand
     sentiment: Optional[str] = None
 
 

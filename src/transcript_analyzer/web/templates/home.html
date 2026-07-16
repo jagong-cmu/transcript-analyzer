@@ -2,9 +2,11 @@
 {% block content %}
 <div class="page-head">
   <h1>Dashboard</h1>
-  <p class="muted">{{ total }} conversation(s) indexed across {{ categories | length }} categories.</p>
+  <p class="muted">{{ total }} conversation(s), organized by date.
+    {% if categories %}{{ categories | length }} categories.{% endif %}</p>
 </div>
 
+{% if categories %}
 <section>
   <h2>Categories</h2>
   <div class="card-grid">
@@ -13,24 +15,27 @@
         <div class="card-title">{{ name }}</div>
         <div class="card-count">{{ count }}</div>
       </a>
-    {% else %}
-      <p class="muted">Nothing yet — run a sync to ingest transcripts.</p>
     {% endfor %}
   </div>
 </section>
+{% endif %}
 
 <section>
-  <h2>Recent conversations</h2>
-  <ul class="list">
-    {% for r in recent %}
-      <li>
-        <a href="/transcript/{{ r.transcript_id }}">{{ r.title }}</a>
-        <span class="meta">{{ r.date }} · <span class="pill">{{ r.category }}</span> · {{ r.source }}</span>
-      </li>
-    {% else %}
-      <li class="muted">No conversations yet.</li>
-    {% endfor %}
-  </ul>
+  <h2>Conversations by date</h2>
+  {% for month, items in timeline %}
+    <h3 class="month">{{ month }}</h3>
+    <ul class="list">
+      {% for r in items %}
+        <li>
+          <a href="/transcript/{{ r.transcript_id }}">{{ r.title }}</a>
+          <span class="meta">{{ r.date }} · {{ r.source }}</span>
+          {% if r.summary %}<p class="summary">{{ r.summary }}</p>{% endif %}
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p class="muted">No conversations yet — run a sync.</p>
+  {% endfor %}
 </section>
 
 <section>

@@ -4,7 +4,8 @@
 <div class="page-head">
   <h1>{{ rec.title }}</h1>
   <p class="meta">
-    {{ rec.date }} · <a href="/category/{{ rec.category | urlencode }}"><span class="pill">{{ rec.category }}</span></a> · {{ rec.source }}
+    {{ rec.date }} · {{ rec.source }}
+    {% for c in note_categories %}· <a href="/category/{{ c | urlencode }}"><span class="pill">{{ c }}</span></a>{% endfor %}
     {% if obsidian_url %}· <a href="{{ obsidian_url }}">Open in Obsidian ↗</a>{% endif %}
   </p>
 </div>

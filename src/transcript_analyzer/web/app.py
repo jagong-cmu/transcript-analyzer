@@ -11,8 +11,11 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from ..config import load_config
+from collections import defaultdict
+
 from ..db import (
     all_transcripts,
+    categories_for,
     category_counts,
     get_conn,
     get_transcript,
@@ -45,19 +48,27 @@ templates.env.filters["obsidian"] = obsidian_uri
 def home(request: Request):
     with get_conn(cfg.db_path) as conn:
         cats = category_counts(conn)
-        recent = all_transcripts(conn)[:12]
+        records = all_transcripts(conn)  # already ordered by date DESC
         action_items = []
-        for rec in all_transcripts(conn):
+        for rec in records:
             for a in rec.action_items:
                 action_items.append({"text": a, "title": rec.title, "id": rec.transcript_id})
+
+    # Group notes by month for the date-organized timeline.
+    by_month: dict[str, list] = defaultdict(list)
+    for rec in records:
+        month = rec.date[:7] if len(rec.date) >= 7 else "undated"
+        by_month[month].append(rec)
+    timeline = sorted(by_month.items(), key=lambda kv: kv[0], reverse=True)
+
     return templates.TemplateResponse(
         request,
         "home.html",
         {
             "categories": cats,
-            "recent": recent,
+            "timeline": timeline,
             "action_items": action_items[:25],
-            "total": sum(n for _, n in cats),
+            "total": len(records),
         },
     )
 
@@ -79,12 +90,14 @@ def transcript(request: Request, tid: str):
     with get_conn(cfg.db_path) as conn:
         rec = get_transcript(conn, tid)
         cats = category_counts(conn)
+        note_cats = categories_for(conn, tid) if rec else []
     if rec is None:
         return HTMLResponse("Not found", status_code=404)
     return templates.TemplateResponse(
         request,
         "transcript.html",
-        {"rec": rec, "categories": cats, "obsidian_url": obsidian_uri(rec.note_path)},
+        {"rec": rec, "categories": cats, "note_categories": note_cats,
+         "obsidian_url": obsidian_uri(rec.note_path)},
     )
 
 
