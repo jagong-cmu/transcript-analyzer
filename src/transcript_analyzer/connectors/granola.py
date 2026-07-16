@@ -117,8 +117,40 @@ class GranolaClient:
         return names
 
     @staticmethod
+    def _channel_labels(detail: dict) -> tuple[str, str]:
+        """(owner label, other-party label) for segments that carry no name.
+
+        Granola tags each segment's audio channel: 'microphone' = the recorder
+        (owner), 'speaker' = the other party. When there's exactly one other
+        attendee we can name them; otherwise fall back to a generic label.
+        """
+        owner = ((detail.get("owner") or {}).get("name") or "").strip() or "Me"
+        others = []
+        for a in detail.get("attendees") or []:
+            if isinstance(a, dict):
+                n = (a.get("name") or "").strip()
+                if n and n.lower() != owner.lower():
+                    others.append(n)
+        other = others[0] if len(others) == 1 else "Speaker"
+        return owner, other
+
+    @staticmethod
+    def _seg_label(seg: dict, owner: str, other: str) -> str:
+        sp = seg.get("speaker") if isinstance(seg.get("speaker"), dict) else {}
+        name = (sp.get("name") or "").strip()
+        if name:
+            return name
+        src = sp.get("source")
+        if src == "microphone":
+            return owner
+        if src == "speaker":
+            return other
+        return ""
+
+    @staticmethod
     def _transcript_text(detail: dict) -> str:
         segments = detail.get("transcript") or []
+        owner, other = GranolaClient._channel_labels(detail)
         lines: list[str] = []
         prev = None
         for seg in segments:
@@ -127,11 +159,10 @@ class GranolaClient:
             text = (seg.get("text") or "").strip()
             if not text:
                 continue
-            sp = seg.get("speaker") or {}
-            name = (sp.get("name") if isinstance(sp, dict) else None) or ""
-            if name and name != prev:
-                lines.append(f"{name}: {text}")
-                prev = name
+            label = GranolaClient._seg_label(seg, owner, other)
+            if label and label != prev:
+                lines.append(f"{label}: {text}")
+                prev = label
             else:
                 lines.append(text)
         text = "\n".join(lines).strip()
