@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}{{ rec.title }} · Transcript Analyzer{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>{{ rec.title }}</h1>
+  <p class="meta">
+    {{ rec.date }} · <a href="/category/{{ rec.category | urlencode }}"><span class="pill">{{ rec.category }}</span></a> · {{ rec.source }}
+    {% if obsidian_url %}· <a href="{{ obsidian_url }}">Open in Obsidian ↗</a>{% endif %}
+  </p>
+</div>
+
+{% if rec.people %}
+<p><strong>People:</strong>
+  {% for p in rec.people %}<span class="pill soft">{{ p }}</span>{% endfor %}
+</p>
+{% endif %}
+
+<section>
+  <h2>Summary</h2>
+  <p>{{ rec.summary or "No summary." }}</p>
+</section>
+
+{% if rec.action_items %}
+<section>
+  <h2>Action items</h2>
+  <ul class="checklist">
+    {% for a in rec.action_items %}<li><span class="box">☐</span> {{ a }}</li>{% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+{% if rec.topics %}
+<div class="tags">{% for t in rec.topics %}<span class="tag">#{{ t }}</span>{% endfor %}</div>
+{% endif %}
+
+<section>
+  <h2>Transcript</h2>
+  <details>
+    <summary>Show full transcript</summary>
+    <pre class="transcript">{{ rec.transcript_text }}</pre>
+  </details>
+</section>
+{% endblock %}

@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}{{ category }} · Transcript Analyzer{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>{{ category }}</h1>
+  <p class="muted">{{ items | length }} conversation(s)</p>
+</div>
+<ul class="list">
+  {% for r in items %}
+    <li>
+      <a href="/transcript/{{ r.transcript_id }}">{{ r.title }}</a>
+      <span class="meta">{{ r.date }} · {{ r.source }}</span>
+      {% if r.summary %}<p class="summary">{{ r.summary }}</p>{% endif %}
+      {% if r.topics %}<div class="tags">{% for t in r.topics %}<span class="tag">#{{ t }}</span>{% endfor %}</div>{% endif %}
+    </li>
+  {% else %}
+    <li class="muted">Empty category.</li>
+  {% endfor %}
+</ul>
+{% endblock %}

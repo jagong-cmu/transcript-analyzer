@@ -1,0 +1,44 @@
+# Copy this file to `config.toml` and fill in your values.
+# `config.toml` is gitignored (it holds your Granola token).
+
+[vault]
+# Absolute path to your Obsidian vault.
+path = "/Users/jonathang/Documents/Obsidian Vault"
+# Vault name as Obsidian knows it (used for obsidian:// deep links).
+name = "Obsidian Vault"
+# Folder (relative to the vault) where insight notes are written.
+insights_folder = "Transcript Insights"
+
+[pocket]
+# Folder (relative to the vault) that Pocket AI writes its recordings into.
+folder = "Pocket AI Recordings"
+
+[granola]
+# Paste your Granola bearer/session token here to enable Granola sync.
+# Leave empty to skip Granola.
+token = ""
+api_base = "https://api.granola.ai"
+
+[ollama]
+host = "http://localhost:11434"
+# Chat model for insights + Q&A. Recommend `ollama pull qwen2.5:7b-instruct`.
+# Falls back gracefully; qwen2.5:3b works if that's all you have.
+chat_model = "qwen2.5:3b"
+embed_model = "nomic-embed-text"
+# Request timeout (seconds) for a single LLM call.
+timeout = 600
+
+[sync]
+# How often the launchd agent runs, in seconds (used by install_launchd.sh).
+interval_seconds = 1200
+
+[taxonomy]
+# Seed categories. New ones are added automatically as transcripts arrive.
+seed = ["Fundraising", "Product", "Engineering", "Hiring", "Sales", "Research", "Personal", "Operations"]
+# Cosine-similarity threshold above which a proposed new category is merged
+# into an existing one instead of created.
+merge_threshold = 0.82
+
+[web]
+host = "127.0.0.1"
+port = 8787

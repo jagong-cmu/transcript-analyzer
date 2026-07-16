@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Transcript Analyzer{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <a href="/" class="brand">◆ Transcript Analyzer</a>
+  <nav>
+    <a href="/">Dashboard</a>
+    <a href="/chat">Ask</a>
+  </nav>
+</header>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="sidebar-title">Categories</div>
+    <ul class="cat-list">
+      {% for name, count in categories %}
+        <li><a href="/category/{{ name | urlencode }}">{{ name }} <span class="badge">{{ count }}</span></a></li>
+      {% else %}
+        <li class="muted">No categories yet.</li>
+      {% endfor %}
+    </ul>
+  </aside>
+  <main class="content">
+    {% block content %}{% endblock %}
+  </main>
+</div>
+</body>
+</html>

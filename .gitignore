@@ -1,0 +1,17 @@
+# Secrets & local config
+config.toml
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# Local data (index, logs, taxonomy)
+data/
+
+# macOS
+.DS_Store

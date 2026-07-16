@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-head">
+  <h1>Dashboard</h1>
+  <p class="muted">{{ total }} conversation(s) indexed across {{ categories | length }} categories.</p>
+</div>
+
+<section>
+  <h2>Categories</h2>
+  <div class="card-grid">
+    {% for name, count in categories %}
+      <a class="card cat-card" href="/category/{{ name | urlencode }}">
+        <div class="card-title">{{ name }}</div>
+        <div class="card-count">{{ count }}</div>
+      </a>
+    {% else %}
+      <p class="muted">Nothing yet — run a sync to ingest transcripts.</p>
+    {% endfor %}
+  </div>
+</section>
+
+<section>
+  <h2>Recent conversations</h2>
+  <ul class="list">
+    {% for r in recent %}
+      <li>
+        <a href="/transcript/{{ r.transcript_id }}">{{ r.title }}</a>
+        <span class="meta">{{ r.date }} · <span class="pill">{{ r.category }}</span> · {{ r.source }}</span>
+      </li>
+    {% else %}
+      <li class="muted">No conversations yet.</li>
+    {% endfor %}
+  </ul>
+</section>
+
+<section>
+  <h2>Open action items</h2>
+  <ul class="checklist">
+    {% for a in action_items %}
+      <li><span class="box">☐</span> {{ a.text }}
+        <a class="src" href="/transcript/{{ a.id }}">↗ {{ a.title }}</a></li>
+    {% else %}
+      <li class="muted">No action items.</li>
+    {% endfor %}
+  </ul>
+</section>
+{% endblock %}
