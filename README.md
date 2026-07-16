@@ -20,7 +20,11 @@ Pocket folder ┘   (insights + category)  └─> SQLite + embeddings (derived 
 
 - **Pocket AI** already writes markdown into a vault folder (`Pocket AI Recordings`) — we read it.
 - **Granola** is pulled via its **official public API** (`public-api.granola.ai/v1`) using an API key.
-- Insight notes are written to `Transcript Insights/<Category>/…` in your vault (the canonical store).
+- Insight notes are written **flat, organized by recording date** (date-prefixed filenames) into
+  `Transcript Insights/` in your vault (the canonical store). No automatic categories.
+- Categories are **created on demand**: run `scripts/categorize.py` with your own category list and
+  the local LLM sorts notes into non-destructive **Category index notes** (`Transcript Insights/
+  Categories/`). Notes never move; categories are an overlay.
 - A SQLite + embedding index is rebuilt *by parsing those notes*, so the dashboard uses your vault.
 
 ## Setup
@@ -62,6 +66,20 @@ ollama pull nomic-embed-text
 ./.venv/bin/python -m transcript_analyzer.web.app
 # -> http://127.0.0.1:8787
 ```
+
+### Categorizing (on demand)
+
+Notes are organized by date. To group them into categories *you* choose, run:
+
+```bash
+./.venv/bin/python scripts/categorize.py Fundraising Hiring Product Personal
+# or comma-separated:
+./.venv/bin/python scripts/categorize.py "Fundraising, Hiring, Product, Personal"
+```
+
+The local LLM assigns each note to one of your categories (or none), writes Category index notes
+under `Transcript Insights/Categories/`, and populates the dashboard's category views. Re-run
+anytime with a different list — it's non-destructive and replaces the previous categorization.
 
 ### Background automation (launchd)
 
