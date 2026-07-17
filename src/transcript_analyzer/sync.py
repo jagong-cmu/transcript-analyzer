@@ -1,16 +1,18 @@
 """Sync orchestrator: pull new transcripts -> insights -> Obsidian note -> index.
 
 Idempotent: each (source, native_id) is tracked with a content hash in sync_state,
-so re-running only reprocesses changed transcripts.
+so re-running only reprocesses changed transcripts. Junk transcripts are
+filtered before any (billable) LLM call and recorded so they are never
+refetched. After a successful sync pass, the synthesis engine runs behind its
+own daily cadence guard.
 """
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from datetime import datetime, timezone
 from typing import Iterable, Optional
-
-import os
 
 from .config import Config, load_config
 from .connectors import pocket
@@ -23,14 +25,17 @@ from .db import (
     set_meta,
 )
 from .models import Transcript
+from .obsidian import writer
+from .pipeline.indexer import index_note
+from .pipeline.insights import extract_insight
+from .pipeline.llm import LLM, LLMBudgetError, LLMKillSwitchError
+from .pipeline.quality import junk_reason
+
+FAILURE_COUNTER_KEY = "insight_failures_total"
 
 
 def _high_water_key(source: str) -> str:
     return f"{source}_last_created_at"
-from .obsidian import writer
-from .pipeline.indexer import index_note
-from .pipeline.insights import extract_insight
-from .pipeline.llm import LLM
 
 
 def _now() -> str:
@@ -84,6 +89,15 @@ def _maybe_download_audio(cfg: Config, transcript: Transcript, insight) -> Optio
     return dest.name if got else None
 
 
+def _count_failure(cfg: Config) -> int:
+    """Visible failure counter (surfaced in the sync summary and /health-adjacent
+    tooling) so silent extraction failures can't hide."""
+    with get_conn(cfg.db_path) as conn:
+        total = int(get_meta(conn, FAILURE_COUNTER_KEY) or 0) + 1
+        set_meta(conn, FAILURE_COUNTER_KEY, str(total))
+    return total
+
+
 def process_transcript(
     cfg: Config,
     transcript: Transcript,
@@ -118,8 +132,8 @@ def process_transcript(
         except OSError:
             pass
 
-    # Index the note we just wrote (parses it back → sqlite + embeddings).
-    index_note(cfg, note_path, llm)
+    # Index the note we just wrote (parses it back -> sqlite).
+    index_note(cfg, note_path)
     with get_conn(cfg.db_path) as conn:
         record_sync(
             conn, transcript.source, transcript.native_id,
@@ -136,6 +150,7 @@ def sync(
     dry_run: bool = False,
     force: bool = False,
     verbose: bool = True,
+    synthesize_after: bool = True,
 ) -> dict:
     cfg = cfg or load_config()
     sources = sources or _default_sources(cfg)
@@ -143,10 +158,18 @@ def sync(
 
     health = llm.health()
     if not health["ok"]:
-        msg = health.get("error") or f"missing models: {health.get('missing')}"
-        print(f"[sync] WARNING: Ollama not ready ({msg}).", file=sys.stderr)
+        # Don't burn a whole source pass into per-transcript failures.
+        reason = (
+            "kill switch on" if health["kill_switch"]
+            else "no API key configured" if not health["key_configured"]
+            else f"monthly budget reached (${health['month_spend_usd']:.2f} "
+                 f"of ${health['monthly_budget_usd']:.2f})"
+        )
+        print(f"[sync] SKIPPED: Claude API unavailable ({reason}).", file=sys.stderr)
+        return {"processed": 0, "skipped": 0, "junk": 0, "errors": 1,
+                "items": [], "error_details": [{"error": reason}]}
 
-    processed, skipped, errors = [], 0, []
+    processed, skipped, junk, errors = [], 0, 0, []
     for source in sources:
         if verbose:
             print(f"[sync] source: {source}")
@@ -168,14 +191,34 @@ def sync(
                     if prev == t.hash:
                         skipped += 1
                         continue
+
+                # Quality floor: junk never reaches the (billable) LLM or the
+                # vault, and is recorded so it isn't reconsidered next cycle.
+                reason = junk_reason(t, cfg)
+                if reason is not None:
+                    junk += 1
+                    if verbose:
+                        print(f"  - junk: {t.title} ({reason})")
+                    if not dry_run:
+                        with get_conn(cfg.db_path) as conn:
+                            record_sync(conn, t.source, t.native_id, t.hash, "", _now())
+                    continue
+
                 try:
                     res = process_transcript(cfg, t, llm, dry_run=dry_run)
                     processed.append(res)
                     if verbose:
                         print(f"  + {res['title']}")
-                except Exception as e:  # noqa: BLE001 - one bad transcript shouldn't stop sync
+                except (LLMKillSwitchError, LLMBudgetError) as e:
+                    # Hard stop: no point trying the remaining transcripts.
                     errors.append({"id": t.id, "title": t.title, "error": str(e)})
-                    print(f"  ! error on {t.title}: {e}", file=sys.stderr)
+                    print(f"[sync] STOPPING: {e}", file=sys.stderr)
+                    break
+                except Exception as e:  # noqa: BLE001 - one bad transcript shouldn't stop sync
+                    total = _count_failure(cfg)
+                    errors.append({"id": t.id, "title": t.title, "error": str(e)})
+                    print(f"  ! error on {t.title}: {e} "
+                          f"(insight failures to date: {total})", file=sys.stderr)
         except Exception as e:  # noqa: BLE001 - a whole source failing (e.g. Granola auth)
             errors.append({"source": source, "error": str(e)})
             print(f"[sync] source {source} failed: {e}", file=sys.stderr)
@@ -188,16 +231,32 @@ def sync(
     if not dry_run and processed:
         writer.rebuild_indexes(cfg)
 
+    # Synthesis runs at most once per day (its own cadence guard), never per
+    # 20-minute sync cycle.
+    synthesis_summary = None
+    if not dry_run and synthesize_after and cfg.synthesis.enabled:
+        from .pipeline import synthesize
+
+        try:
+            synthesis_summary = synthesize.maybe_run(cfg, llm=llm, verbose=verbose)
+        except (LLMKillSwitchError, LLMBudgetError) as e:
+            print(f"[sync] synthesis stopped: {e}", file=sys.stderr)
+        except Exception as e:  # noqa: BLE001 - synthesis must never break ingestion
+            print(f"[sync] synthesis failed: {e}", file=sys.stderr)
+
     summary = {
         "processed": len(processed),
         "skipped": skipped,
+        "junk": junk,
         "errors": len(errors),
         "items": processed,
         "error_details": errors,
+        "synthesis": synthesis_summary,
     }
     if verbose:
         print(f"[sync] done: {summary['processed']} processed, "
-              f"{summary['skipped']} skipped, {summary['errors']} errors")
+              f"{summary['skipped']} skipped, {summary['junk']} junk, "
+              f"{summary['errors']} errors")
     return summary
 
 
@@ -217,6 +276,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                         help="Extract insights + print, but don't write notes or index.")
     parser.add_argument("--force", action="store_true",
                         help="Reprocess even if unchanged.")
+    parser.add_argument("--no-synthesis", action="store_true",
+                        help="Skip the post-sync synthesis pass.")
     args = parser.parse_args(argv)
 
     cfg = load_config()
@@ -226,6 +287,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         limit=args.limit,
         dry_run=args.dry_run,
         force=args.force,
+        synthesize_after=not args.no_synthesis,
     )
     return 0 if summary["errors"] == 0 else 1
 

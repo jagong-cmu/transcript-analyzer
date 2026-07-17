@@ -1,4 +1,4 @@
-"""Transcript Analyzer: ingest Granola + Pocket AI transcripts, extract insights
-with local Ollama, store them in Obsidian, and browse/chat via a local dashboard."""
+"""Transcript Analyzer: ingest Granola + Pocket AI transcripts, synthesize with
+the Claude API, store them in Obsidian, and browse/chat via a local dashboard."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

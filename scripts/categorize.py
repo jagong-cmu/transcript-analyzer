@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ask the local LLM to sort your date-organized notes into categories you provide.
+"""Ask Claude to sort your date-organized notes into categories you provide.
 
 Notes stay where they are (organized by date); this creates non-destructive
 category index notes in the vault under "Transcript Insights/Categories/" and

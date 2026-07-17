@@ -1,7 +1,7 @@
 """On-demand categorization.
 
 Notes are stored flat by date. This assigns each note to one of a user-provided
-list of categories (using the local LLM) and creates non-destructive category
+list of categories (using the Claude API) and creates non-destructive category
 index notes (MOCs) in the vault under `<insights_folder>/Categories/`. The note
 files themselves are never moved; categories are an overlay.
 
@@ -23,7 +23,7 @@ from ..db import (
 )
 from ..models import NoteRecord
 from ..obsidian.writer import CATEGORIES_SUBDIR
-from .llm import LLM
+from .llm import LLM, LLMError
 
 NONE_LABEL = "None"
 
@@ -56,10 +56,9 @@ def _classify(llm: LLM, note: NoteRecord, categories: list[str]) -> Optional[str
         summary=note.summary or "(no summary)",
     )
     try:
-        data = llm.chat_json(SYSTEM, user, schema=_schema(categories),
-                             options={"temperature": 0.0, "num_ctx": 4096})
+        data = llm.chat_json(SYSTEM, user, schema=_schema(categories))
         choice = str(data.get("category", "")).strip()
-    except Exception:  # noqa: BLE001
+    except LLMError:
         return None
     if choice == NONE_LABEL or choice not in categories:
         return None

@@ -20,6 +20,22 @@ def content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
+class Attendee(BaseModel):
+    """A meeting participant. `email` is the stable identity key (display
+    names vary: "Angela Jin" vs "Angela_jin"); it may be empty when the
+    source has no email (Pocket, transcript-only speakers)."""
+
+    name: str = ""
+    email: str = ""
+
+    @property
+    def key(self) -> str:
+        """Identity key: lowercased email when present, else normalized name."""
+        if self.email.strip():
+            return self.email.strip().lower()
+        return " ".join(self.name.lower().replace("_", " ").split())
+
+
 class Transcript(BaseModel):
     """A normalized transcript from any source."""
 
@@ -29,6 +45,7 @@ class Transcript(BaseModel):
     title: str
     date: _date
     participants: list[str] = Field(default_factory=list)
+    attendees: list[Attendee] = Field(default_factory=list)
     text: str
     source_ref: str = ""  # granola doc id, or absolute vault file path
     remote_sort_key: str = ""  # e.g. Granola created_at ISO, for incremental high-water marks
@@ -61,6 +78,10 @@ class NoteRecord(BaseModel):
     people: list[str] = Field(default_factory=list)
     topics: list[str] = Field(default_factory=list)
     action_items: list[str] = Field(default_factory=list)
+    # Unchecked "- [ ]" items parsed from the note body — the note is the
+    # source of truth, so ticking a box in Obsidian closes the commitment.
+    open_action_items: list[str] = Field(default_factory=list)
+    attendees: list[Attendee] = Field(default_factory=list)
     summary: str = ""
     note_path: str = ""  # absolute path to the .md note
     transcript_text: str = ""

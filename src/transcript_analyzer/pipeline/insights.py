@@ -1,7 +1,11 @@
-"""Extract structured insights from a transcript using the local LLM.
+"""Extract structured insights from a transcript using the Claude API.
 
 Note: this does NOT assign a category. Notes are organized by date; categories
 are created on demand via the `categorize` command (see pipeline/organize.py).
+
+Failures propagate (LLMError and subclasses) — under a paid API we never
+write an empty note we were billed for; the sync loop counts the failure and
+retries the transcript on a later cycle.
 """
 from __future__ import annotations
 
@@ -11,10 +15,10 @@ from ..config import Config
 from ..models import Insight, Transcript
 from .llm import LLM
 
-_MAX_CHARS = 24000  # ~6k tokens of transcript; fits comfortably in num_ctx below
-_NUM_CTX = 16384    # room for instructions + transcript + JSON output
+# Cost sanity cap, not a context-window limit (the 1M window fits any
+# transcript this system will ever see). ~25k tokens of transcript.
+_MAX_CHARS = 100_000
 
-# JSON Schema passed to Ollama structured outputs to force the exact shape.
 INSIGHT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -23,14 +27,13 @@ INSIGHT_SCHEMA = {
         "action_items": {"type": "array", "items": {"type": "string"}},
         "people": {"type": "array", "items": {"type": "string"}},
         "topics": {"type": "array", "items": {"type": "string"}},
-        "sentiment": {"type": "string"},
+        "sentiment": {"type": "string", "enum": ["positive", "neutral", "negative", "mixed"]},
     },
     "required": ["summary", "key_points", "action_items", "people", "topics", "sentiment"],
 }
 
 SYSTEM = """You are an assistant that reads a meeting or conversation transcript and
-extracts a concise, structured summary. You ALWAYS respond with a single JSON object
-and nothing else. Be faithful to the transcript; do not invent facts."""
+extracts a concise, structured summary. Be faithful to the transcript; do not invent facts."""
 
 USER_TEMPLATE = """Analyze the following transcript and return a JSON object with EXACTLY these keys:
 
@@ -47,9 +50,7 @@ Known participants: {participants}
 Transcript:
 \"\"\"
 {text}
-\"\"\"
-
-Respond with ONLY the JSON object."""
+\"\"\""""
 
 
 def extract_insight(
@@ -69,13 +70,7 @@ def extract_insight(
         text=text,
     )
 
-    try:
-        data = llm.chat_json(
-            SYSTEM, user, schema=INSIGHT_SCHEMA,
-            options={"temperature": 0.2, "num_ctx": _NUM_CTX},
-        )
-    except Exception:  # noqa: BLE001 - fall back to a minimal insight on LLM/JSON failure
-        data = {}
+    data = llm.chat_json(SYSTEM, user, schema=INSIGHT_SCHEMA)
 
     return Insight(
         summary=_as_str(data.get("summary")),

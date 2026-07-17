@@ -1,14 +1,29 @@
-"""Retrieval-augmented Q&A over the indexed transcripts (fully local)."""
+"""Agentic Q&A over the indexed transcripts.
+
+No embeddings, no top-k: at personal-corpus scale (~12k tokens of summaries)
+Claude reads the summary of EVERY conversation in context, then pulls whole
+notes on demand via the fetch_transcript tool. Whole notes mean speaker
+labels stay intact, dates come from frontmatter, and proper nouns are exact
+text — the three defects vector retrieval had.
+
+The corpus block carries a cache_control breakpoint, so repeated questions
+within a session pay ~0.1x for the corpus prefix.
+"""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+from datetime import date
 from typing import Iterator, Optional
 
-import numpy as np
-
 from .config import Config, load_config
-from .db import get_conn, get_transcript, load_all_chunk_embeddings
+from .db import all_transcripts, get_conn
+from .models import NoteRecord
 from .pipeline.llm import LLM
+
+_MAX_ROUNDS = 6
+_MAX_NOTE_CHARS = 60_000
+_CITATION_RE = re.compile(r"\[(\d+)\]")
 
 
 @dataclass
@@ -16,85 +31,163 @@ class Retrieved:
     transcript_id: str
     title: str
     note_path: str
-    text: str
-    score: float
 
 
-SYSTEM = """You answer questions using ONLY the provided excerpts from the user's
-meeting and conversation transcripts. Cite sources inline like [1], [2] that map to
-the numbered excerpts. If the excerpts don't contain the answer, say so plainly.
-Be concise and specific."""
+SYSTEM = """You answer questions about the user's own meeting and conversation
+transcripts. You are given an index of EVERY conversation they have recorded:
+one numbered entry per conversation with its id, date, title, people, and
+summary. Read the whole index — do not skim.
+
+When a summary is not enough (exact wording, who said what, numbers,
+specifics), call fetch_transcript with the conversation's id to read the full
+note. Fetch as many as you need, in parallel when independent.
+
+Cite conversations inline as [n], where n is the entry's number in the index.
+If the index doesn't contain the answer, say so plainly. Be concise and
+specific."""
+
+FETCH_TOOL = {
+    "name": "fetch_transcript",
+    "description": (
+        "Read the full note for one conversation from the index: metadata, "
+        "summary, and the complete transcript with speaker labels. Use this "
+        "whenever the index summary is not enough to answer precisely."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "transcript_id": {
+                "type": "string",
+                "description": "The `id` field of an index entry.",
+            }
+        },
+        "required": ["transcript_id"],
+        "additionalProperties": False,
+    },
+}
 
 
-def retrieve(cfg: Config, question: str, llm: LLM, k: int = 6) -> list[Retrieved]:
+def _corpus(records: list[NoteRecord]) -> tuple[str, dict[int, NoteRecord]]:
+    lines = ["CONVERSATION INDEX (newest first):", ""]
+    by_num: dict[int, NoteRecord] = {}
+    for n, rec in enumerate(records, 1):
+        by_num[n] = rec
+        people = ", ".join(rec.people) or "(unknown)"
+        summary = " ".join(rec.summary.split()) or "(no summary)"
+        lines.append(
+            f"[{n}] id={rec.transcript_id} | {rec.date} | {rec.title} | people: {people}"
+        )
+        lines.append(f"    {summary}")
+    return "\n".join(lines), by_num
+
+
+def _render_full(rec: NoteRecord) -> str:
+    text = rec.transcript_text or "(no transcript text)"
+    if len(text) > _MAX_NOTE_CHARS:
+        text = text[:_MAX_NOTE_CHARS] + "\n...[truncated]"
+    return (
+        f"Title: {rec.title}\nDate: {rec.date}\nPeople: {', '.join(rec.people)}\n\n"
+        f"Summary:\n{rec.summary}\n\nTranscript:\n{text}"
+    )
+
+
+def stream_events(
+    question: str,
+    cfg: Optional[Config] = None,
+    llm: Optional[LLM] = None,
+) -> Iterator[tuple[str, object]]:
+    """Yield ("token", str) as the answer streams, then ("sources", [dict])
+    mapping the [n] citations in the answer to transcripts."""
+    cfg = cfg or load_config()
+    llm = llm or LLM(cfg)
+
     with get_conn(cfg.db_path) as conn:
-        rows = load_all_chunk_embeddings(conn)
-        if not rows:
-            return []
-        qv = llm.embed_one(question)
-        mat = np.ascontiguousarray(np.vstack([r[3] for r in rows]), dtype=np.float32)
-        qv = np.ascontiguousarray(np.nan_to_num(qv), dtype=np.float32)
-        # float32 matmul can emit spurious FP warnings on some BLAS builds
-        # (Apple Silicon); data is verified finite, so silence them here.
-        with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
-            sims = mat @ qv  # embeddings are normalized -> cosine similarity
-        top_idx = np.argsort(-sims)[: max(k * 3, k)]
+        records = all_transcripts(conn)
+    corpus, by_num = _corpus(records)
+    by_id = {r.transcript_id: r for r in records}
 
-        # Keep the best chunk per transcript, then take top-k transcripts.
-        best: dict[str, tuple[float, str]] = {}
-        for i in top_idx:
-            _cid, tid, text, _emb = rows[i]
-            score = float(sims[i])
-            if tid not in best or score > best[tid][0]:
-                best[tid] = (score, text)
+    messages: list[dict] = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": corpus,
+                    "cache_control": {"type": "ephemeral"},
+                },
+                {
+                    "type": "text",
+                    "text": f"Today's date: {date.today().isoformat()}\n\nQuestion: {question}",
+                },
+            ],
+        }
+    ]
 
-        ranked = sorted(best.items(), key=lambda kv: -kv[1][0])[:k]
-        out: list[Retrieved] = []
-        for tid, (score, text) in ranked:
-            rec = get_transcript(conn, tid)
-            out.append(
-                Retrieved(
-                    transcript_id=tid,
-                    title=rec.title if rec else tid,
-                    note_path=rec.note_path if rec else "",
-                    text=text,
-                    score=score,
+    text_parts: list[str] = []
+    for _round in range(_MAX_ROUNDS):
+        with llm.stream(
+            system=SYSTEM,
+            messages=messages,
+            tools=[FETCH_TOOL],
+            thinking={"type": "adaptive"},
+        ) as s:
+            for tok in s.text_stream:
+                text_parts.append(tok)
+                yield ("token", tok)
+            final = s.get_final_message()
+        if final.stop_reason != "tool_use":
+            break
+        messages.append({"role": "assistant", "content": final.content})
+        results = []
+        for block in final.content:
+            if block.type != "tool_use":
+                continue
+            tid = str(block.input.get("transcript_id", "")).strip()
+            rec = by_id.get(tid)
+            if rec is not None:
+                results.append(
+                    {"type": "tool_result", "tool_use_id": block.id,
+                     "content": _render_full(rec)}
                 )
-            )
-        return out
+            else:
+                results.append(
+                    {"type": "tool_result", "tool_use_id": block.id,
+                     "content": f"No transcript with id {tid!r} in the index.",
+                     "is_error": True}
+                )
+        messages.append({"role": "user", "content": results})
+    else:
+        yield ("token", "\n\n[Stopped after too many retrieval rounds.]")
 
-
-def _build_prompt(question: str, hits: list[Retrieved]) -> str:
-    blocks = []
-    for i, h in enumerate(hits, 1):
-        blocks.append(f"[{i}] {h.title}\n{h.text.strip()}")
-    context = "\n\n".join(blocks) if blocks else "(no excerpts found)"
-    return f"Excerpts:\n\n{context}\n\nQuestion: {question}\n\nAnswer (cite [n]):"
+    answer = "".join(text_parts)
+    cited = sorted(
+        {int(m) for m in _CITATION_RE.findall(answer) if int(m) in by_num}
+    )
+    yield (
+        "sources",
+        [
+            {
+                "n": n,
+                "id": by_num[n].transcript_id,
+                "title": by_num[n].title,
+                "note_path": by_num[n].note_path,
+            }
+            for n in cited
+        ],
+    )
 
 
 def answer(
     question: str,
     cfg: Optional[Config] = None,
     llm: Optional[LLM] = None,
-    k: int = 6,
 ) -> dict:
-    cfg = cfg or load_config()
-    llm = llm or LLM(cfg)
-    hits = retrieve(cfg, question, llm, k=k)
-    prompt = _build_prompt(question, hits)
-    text = llm.chat(SYSTEM, prompt)
-    return {"answer": text, "sources": hits}
-
-
-def answer_stream(
-    question: str,
-    cfg: Optional[Config] = None,
-    llm: Optional[LLM] = None,
-    k: int = 6,
-) -> tuple[list[Retrieved], Iterator[str]]:
-    """Return (sources, token_iterator) so the caller can show citations + stream."""
-    cfg = cfg or load_config()
-    llm = llm or LLM(cfg)
-    hits = retrieve(cfg, question, llm, k=k)
-    prompt = _build_prompt(question, hits)
-    return hits, llm.chat_stream(SYSTEM, prompt)
+    """Non-streaming convenience wrapper around stream_events()."""
+    tokens: list[str] = []
+    sources: list[dict] = []
+    for kind, payload in stream_events(question, cfg=cfg, llm=llm):
+        if kind == "token":
+            tokens.append(payload)  # type: ignore[arg-type]
+        elif kind == "sources":
+            sources = payload  # type: ignore[assignment]
+    return {"answer": "".join(tokens), "sources": sources}
