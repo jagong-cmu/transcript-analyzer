@@ -1,10 +1,11 @@
 [project]
 name = "transcript-analyzer"
-version = "0.1.0"
-description = "Ingest Granola + Pocket AI transcripts, extract insights with local Ollama, store in Obsidian, browse + chat via a local dashboard."
+version = "0.2.0"
+description = "Ingest Granola + Pocket AI transcripts, synthesize with the Claude API (digests, dossiers, study rollups, meeting prep), store in Obsidian, browse + chat via a local dashboard."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "anthropic>=0.66",
     "fastapi>=0.110",
     "uvicorn[standard]>=0.27",
     "httpx>=0.27",
@@ -12,10 +13,15 @@ dependencies = [
     "python-frontmatter>=1.1",
     "jinja2>=3.1",
     "python-multipart>=0.0.9",
-    "numpy>=1.26",
     "python-slugify>=8.0",
+    "icalendar>=5.0",
+    "recurring-ical-events>=2.2",
     "tomli>=2.0; python_version < '3.11'",
-    "tenacity>=8.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
 ]
 
 [project.scripts]
@@ -28,3 +34,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -125,20 +125,22 @@ def chat_page(request: Request):
 
 @app.post("/chat/ask")
 def chat_ask(question: str = Form(...)):
-    """Stream the answer via Server-Sent Events; send sources first as a JSON event."""
+    """Stream the answer via Server-Sent Events. Tokens stream as they arrive;
+    the sources event (mapping [n] citations) arrives once the answer is done."""
     llm = LLM(cfg)
-    sources, tokens = rag.answer_stream(question, cfg=cfg, llm=llm)
 
     def event_gen():
-        src_payload = [
-            {"n": i + 1, "title": s.title, "id": s.transcript_id,
-             "obsidian": obsidian_uri(s.note_path)}
-            for i, s in enumerate(sources)
-        ]
-        yield f"event: sources\ndata: {json.dumps(src_payload)}\n\n"
         try:
-            for tok in tokens:
-                yield f"data: {json.dumps(tok)}\n\n"
+            for kind, payload in rag.stream_events(question, cfg=cfg, llm=llm):
+                if kind == "token":
+                    yield f"data: {json.dumps(payload)}\n\n"
+                elif kind == "sources":
+                    src_payload = [
+                        {"n": s["n"], "title": s["title"], "id": s["id"],
+                         "obsidian": obsidian_uri(s["note_path"])}
+                        for s in payload
+                    ]
+                    yield f"event: sources\ndata: {json.dumps(src_payload)}\n\n"
         except Exception as e:  # noqa: BLE001
             yield f"data: {json.dumps(' [error: ' + str(e) + ']')}\n\n"
         yield "event: done\ndata: {}\n\n"
@@ -148,6 +150,7 @@ def chat_ask(question: str = Form(...)):
 
 @app.get("/health")
 def health():
+    """API/key status plus the cost guard's view of this month's spend."""
     llm = LLM(cfg)
     return llm.health()
 

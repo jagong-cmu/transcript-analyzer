@@ -22,6 +22,13 @@ from ..models import Insight, Transcript
 CATEGORIES_SUBDIR = "Categories"
 ATTACHMENTS_SUBDIR = "Attachments"
 
+# The only vault namespaces synthesis may write into (namespace isolation:
+# generated notes never land next to — or over — transcript notes).
+SYNTH_SUBDIRS = ("Digests", "People", "Studies", "Prep")
+
+SYNTH_BEGIN = "<!-- synth:begin — generated; edits inside this block are overwritten -->"
+SYNTH_END = "<!-- synth:end -->"
+
 
 def attachments_dir(cfg: Config) -> Path:
     return cfg.vault.insights_path / ATTACHMENTS_SUBDIR
@@ -88,6 +95,12 @@ def render_note(transcript: Transcript, insight: Insight, audio_name: str | None
     fm_lines.append("people:")
     for p in people_links:
         fm_lines.append(f'  - "{p}"')
+    if transcript.attendees:
+        # The email is the stable person-identity key — persist it.
+        fm_lines.append("attendees:")
+        for a in transcript.attendees:
+            fm_lines.append(f'  - name: "{a.name.replace(chr(34), chr(39))}"')
+            fm_lines.append(f'    email: "{a.email}"')
     fm_lines.append("topics:")
     for t in insight.topics:
         fm_lines.append(f'  - "{t}"')
@@ -134,6 +147,45 @@ def write_note(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(render_note(transcript, insight, audio_name=audio_name), encoding="utf-8")
     return path
+
+
+def write_managed(cfg: Config, path: Path, generated: str, *, title: str = "") -> Path:
+    """Write generated content into a synthesis note, preserving user edits.
+
+    Only the region between the synth markers is ever rewritten; anything the
+    user adds outside it survives regeneration (R9). Refuses to write outside
+    the synthesis namespaces (Digests/, People/, Studies/, Prep/).
+    """
+    root = cfg.vault.insights_path.resolve()
+    resolved = path.resolve()
+    try:
+        rel = resolved.relative_to(root)
+    except ValueError:
+        raise ValueError(f"synthesis write outside the insights folder: {path}")
+    if not rel.parts or rel.parts[0] not in SYNTH_SUBDIRS:
+        raise ValueError(
+            f"synthesis may only write under {SYNTH_SUBDIRS}, got: {rel}"
+        )
+
+    region = f"{SYNTH_BEGIN}\n{generated.strip()}\n{SYNTH_END}"
+    if resolved.exists():
+        text = resolved.read_text(encoding="utf-8")
+        begin = text.find(SYNTH_BEGIN)
+        end = text.find(SYNTH_END)
+        if begin != -1 and end != -1 and end > begin:
+            new_text = text[:begin] + region + text[end + len(SYNTH_END):]
+        else:
+            # User removed the markers — append a fresh region, never clobber.
+            new_text = text.rstrip() + "\n\n" + region + "\n"
+    else:
+        head = ["---", "synth: true", "---", ""]
+        if title:
+            head.append(f"# {title}")
+            head.append("")
+        new_text = "\n".join(head) + region + "\n"
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    resolved.write_text(new_text, encoding="utf-8")
+    return resolved
 
 
 def rebuild_indexes(cfg: Config) -> None:

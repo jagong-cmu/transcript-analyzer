@@ -1,7 +1,8 @@
-"""SQLite index: transcripts (from vault notes), chunks + embeddings, sync state.
+"""SQLite index: transcripts (from vault notes), sync state, LLM spend ledger.
 
-This DB is a *derived* index. The Obsidian markdown notes are the source of truth;
-the indexer rebuilds these tables by parsing the vault notes.
+This DB is a *derived* index. The Obsidian markdown notes are the source of
+truth; the indexer rebuilds these tables by parsing the vault notes. The one
+exception is llm_spend, which is primary data (the cost guard's ledger).
 """
 from __future__ import annotations
 
@@ -9,36 +10,26 @@ import json
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterable, Iterator, Optional
-
-import numpy as np
+from typing import Iterator, Optional
 
 from .models import NoteRecord
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS transcripts (
-    transcript_id   TEXT PRIMARY KEY,
-    source          TEXT NOT NULL,
-    title           TEXT NOT NULL,
-    date            TEXT NOT NULL,
-    category        TEXT NOT NULL,
-    people          TEXT NOT NULL DEFAULT '[]',
-    topics          TEXT NOT NULL DEFAULT '[]',
-    action_items    TEXT NOT NULL DEFAULT '[]',
-    summary         TEXT NOT NULL DEFAULT '',
-    note_path       TEXT NOT NULL DEFAULT '',
-    transcript_text TEXT NOT NULL DEFAULT ''
+    transcript_id     TEXT PRIMARY KEY,
+    source            TEXT NOT NULL,
+    title             TEXT NOT NULL,
+    date              TEXT NOT NULL,
+    category          TEXT NOT NULL,
+    people            TEXT NOT NULL DEFAULT '[]',
+    topics            TEXT NOT NULL DEFAULT '[]',
+    action_items      TEXT NOT NULL DEFAULT '[]',
+    open_action_items TEXT NOT NULL DEFAULT '[]',
+    attendees         TEXT NOT NULL DEFAULT '[]',
+    summary           TEXT NOT NULL DEFAULT '',
+    note_path         TEXT NOT NULL DEFAULT '',
+    transcript_text   TEXT NOT NULL DEFAULT ''
 );
-
-CREATE TABLE IF NOT EXISTS chunks (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    transcript_id TEXT NOT NULL,
-    ord           INTEGER NOT NULL,
-    text          TEXT NOT NULL,
-    embedding     BLOB,
-    FOREIGN KEY (transcript_id) REFERENCES transcripts(transcript_id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_chunks_transcript ON chunks(transcript_id);
 
 -- Tracks what's already been ingested/processed, keyed by source + native id.
 CREATE TABLE IF NOT EXISTS sync_state (
@@ -64,7 +55,31 @@ CREATE TABLE IF NOT EXISTS note_categories (
     FOREIGN KEY (transcript_id) REFERENCES transcripts(transcript_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_note_categories_cat ON note_categories(category);
+
+-- Claude API spend ledger (per calendar month). Primary data, not derived.
+CREATE TABLE IF NOT EXISTS llm_spend (
+    month              TEXT PRIMARY KEY,  -- YYYY-MM
+    calls              INTEGER NOT NULL DEFAULT 0,
+    input_tokens       INTEGER NOT NULL DEFAULT 0,
+    output_tokens      INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+    usd                REAL NOT NULL DEFAULT 0
+);
 """
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    # Embeddings were removed with the move to the Claude API (agentic
+    # retrieval over whole notes replaced vector RAG).
+    conn.execute("DROP TABLE IF EXISTS chunks")
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(transcripts)")}
+    if cols:
+        for col in ("open_action_items", "attendees"):
+            if col not in cols:
+                conn.execute(
+                    f"ALTER TABLE transcripts ADD COLUMN {col} TEXT NOT NULL DEFAULT '[]'"
+                )
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
@@ -74,6 +89,7 @@ def connect(db_path: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 30000")  # wait out concurrent writers
     conn.execute("PRAGMA journal_mode = WAL")     # better concurrent read/write
+    _migrate(conn)
     conn.executescript(SCHEMA)
     return conn
 
@@ -131,36 +147,24 @@ def upsert_transcript(conn: sqlite3.Connection, rec: NoteRecord) -> None:
     conn.execute(
         """INSERT INTO transcripts
              (transcript_id, source, title, date, category, people, topics,
-              action_items, summary, note_path, transcript_text)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              action_items, open_action_items, attendees, summary, note_path,
+              transcript_text)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(transcript_id) DO UPDATE SET
                source=excluded.source, title=excluded.title, date=excluded.date,
                category=excluded.category, people=excluded.people, topics=excluded.topics,
-               action_items=excluded.action_items, summary=excluded.summary,
+               action_items=excluded.action_items,
+               open_action_items=excluded.open_action_items,
+               attendees=excluded.attendees,
+               summary=excluded.summary,
                note_path=excluded.note_path, transcript_text=excluded.transcript_text""",
         (
             rec.transcript_id, rec.source, rec.title, rec.date, rec.category,
             json.dumps(rec.people), json.dumps(rec.topics), json.dumps(rec.action_items),
+            json.dumps(rec.open_action_items),
+            json.dumps([a.model_dump() for a in rec.attendees]),
             rec.summary, rec.note_path, rec.transcript_text,
         ),
-    )
-
-
-def delete_chunks(conn: sqlite3.Connection, transcript_id: str) -> None:
-    conn.execute("DELETE FROM chunks WHERE transcript_id = ?", (transcript_id,))
-
-
-def insert_chunk(
-    conn: sqlite3.Connection,
-    transcript_id: str,
-    ord_: int,
-    text: str,
-    embedding: Optional[np.ndarray],
-) -> None:
-    blob = embedding.astype(np.float32).tobytes() if embedding is not None else None
-    conn.execute(
-        "INSERT INTO chunks (transcript_id, ord, text, embedding) VALUES (?, ?, ?, ?)",
-        (transcript_id, ord_, text, blob),
     )
 
 
@@ -174,6 +178,8 @@ def _row_to_note(row: sqlite3.Row) -> NoteRecord:
         people=json.loads(row["people"]),
         topics=json.loads(row["topics"]),
         action_items=json.loads(row["action_items"]),
+        open_action_items=json.loads(row["open_action_items"]),
+        attendees=json.loads(row["attendees"]),
         summary=row["summary"],
         note_path=row["note_path"],
         transcript_text=row["transcript_text"],
@@ -229,22 +235,7 @@ def set_note_category(conn: sqlite3.Connection, transcript_id: str, category: st
     )
 
 
-def load_all_chunk_embeddings(
-    conn: sqlite3.Connection,
-) -> list[tuple[int, str, str, np.ndarray]]:
-    """Return (chunk_id, transcript_id, text, embedding) for all chunks that have embeddings."""
-    out: list[tuple[int, str, str, np.ndarray]] = []
-    rows = conn.execute(
-        "SELECT id, transcript_id, text, embedding FROM chunks WHERE embedding IS NOT NULL"
-    ).fetchall()
-    for r in rows:
-        emb = np.frombuffer(r["embedding"], dtype=np.float32)
-        out.append((r["id"], r["transcript_id"], r["text"], emb))
-    return out
-
-
 def clear_index(conn: sqlite3.Connection) -> None:
-    conn.execute("DELETE FROM chunks")
     conn.execute("DELETE FROM transcripts")
 
 
@@ -261,3 +252,38 @@ def set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         (key, value),
     )
+
+
+# ---------- llm_spend (cost-guard ledger) ----------
+
+def add_llm_spend(
+    conn: sqlite3.Connection,
+    month: str,
+    calls: int,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int,
+    cache_write_tokens: int,
+    usd: float,
+) -> None:
+    conn.execute(
+        """INSERT INTO llm_spend
+             (month, calls, input_tokens, output_tokens,
+              cache_read_tokens, cache_write_tokens, usd)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(month) DO UPDATE SET
+               calls = calls + excluded.calls,
+               input_tokens = input_tokens + excluded.input_tokens,
+               output_tokens = output_tokens + excluded.output_tokens,
+               cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
+               cache_write_tokens = cache_write_tokens + excluded.cache_write_tokens,
+               usd = usd + excluded.usd""",
+        (month, calls, input_tokens, output_tokens,
+         cache_read_tokens, cache_write_tokens, usd),
+    )
+
+
+def get_llm_spend(conn: sqlite3.Connection, month: str) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM llm_spend WHERE month = ?", (month,)
+    ).fetchone()

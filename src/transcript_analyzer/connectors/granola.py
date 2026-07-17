@@ -17,7 +17,7 @@ from typing import Iterator, Optional
 import httpx
 
 from ..config import Config
-from ..models import Transcript, stable_id
+from ..models import Attendee, Transcript, stable_id
 
 
 class GranolaAuthError(RuntimeError):
@@ -92,6 +92,31 @@ class GranolaClient:
         return self._get(f"/notes/{note_id}", {"include": "transcript"})
 
     # ---------- normalization ----------
+
+    @staticmethod
+    def _attendees(detail: dict) -> list[Attendee]:
+        """Attendees with their email preserved. The email is the stable
+        person-identity key (display names drift: "Angela Jin" vs
+        "Angela_jin"), so it must survive ingest."""
+        out: list[Attendee] = []
+        seen: set[str] = set()
+        for att in detail.get("attendees") or []:
+            if isinstance(att, dict):
+                name = (att.get("name") or "").strip()
+                email = (att.get("email") or "").strip()
+            elif isinstance(att, str):
+                s = att.strip()
+                name, email = ("", s) if "@" in s else (s, "")
+            else:
+                continue
+            if not (name or email):
+                continue
+            a = Attendee(name=name, email=email)
+            if a.key in seen:
+                continue
+            seen.add(a.key)
+            out.append(a)
+        return out
 
     @staticmethod
     def _participants(detail: dict) -> list[str]:
@@ -186,6 +211,7 @@ class GranolaClient:
             title=(detail.get("title") or "Untitled Granola note").strip(),
             date=_parse_date(created),
             participants=self._participants(detail),
+            attendees=self._attendees(detail),
             text=text,
             source_ref=detail.get("web_url") or str(note_id),
             remote_sort_key=str(created or ""),

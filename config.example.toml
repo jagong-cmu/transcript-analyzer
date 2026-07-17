@@ -1,5 +1,5 @@
 # Copy this file to `config.toml` and fill in your values.
-# `config.toml` is gitignored (it holds your Granola token).
+# `config.toml` is gitignored (it holds your API keys).
 
 [vault]
 # Path to your Obsidian vault (`~` is expanded).
@@ -27,25 +27,54 @@ download_audio = true
 token = ""
 api_base = "https://public-api.granola.ai/v1"
 
-[ollama]
-host = "http://localhost:11434"
-# Chat model for insights + Q&A. `ollama pull qwen2.5:7b-instruct` recommended.
-# qwen2.5:3b works too but mis-categorizes more often.
-chat_model = "qwen2.5:7b-instruct"
-embed_model = "nomic-embed-text"
-# Request timeout (seconds) for a single LLM call.
-timeout = 600
+[anthropic]
+# Claude API key (or set the ANTHROPIC_API_KEY environment variable).
+# NOTE: with this key set, transcripts are sent to the Anthropic API for
+# analysis and synthesis — see the privacy note in the README.
+api_key = ""
+model = "claude-opus-4-8"
+# Default per-call output cap (tokens).
+max_tokens = 8192
+# Request timeout (seconds) for a single API call.
+timeout = 300
+# HARD monthly spend ceiling (USD). Once the ledger reaches this, all calls
+# stop until you raise it. Touch data/llm.kill to stop calls immediately.
+monthly_budget_usd = 15.0
+# Hard cap on API calls in a single run (sync cycle / synthesis pass).
+max_calls_per_run = 80
+
+[quality]
+# Ingest-time junk floor: transcripts shorter than this (chars), or whose
+# title matches a junk pattern, are skipped before any billable LLM call.
+min_transcript_chars = 400
+# junk_title_patterns = ["background noise", "hello testing"]  # override defaults
+
+[synthesis]
+enabled = true
+# Days of conversations covered by the daily digest.
+digest_days = 7
+# Minimum conversations before a person gets a dossier in People/.
+dossier_min_conversations = 3
+# Who you are (excluded from dossiers). If left empty, anyone present in
+# >=60% of conversations is assumed to be you.
+self_names = []
+self_emails = []
+
+# Research studies to roll up into Studies/ (repeat the block per study):
+# [[synthesis.studies]]
+# name = "Airport wayfinding research"
+# description = "Intercept interviews and observation sessions with travelers about navigating airports and transit."
+
+[calendar]
+# Secret ICS URL for tomorrow's-meeting prep notes (Google Calendar:
+# Settings -> your calendar -> "Secret address in iCal format").
+# Leave empty to disable Prep/.
+ics_url = ""
 
 [sync]
 # How often the launchd agent runs, in seconds (used by install_launchd.sh).
+# Synthesis has its own cadence guard and runs at most once per day.
 interval_seconds = 1200
-
-[taxonomy]
-# Seed categories. New ones are added automatically as transcripts arrive.
-seed = ["Fundraising", "Product", "Engineering", "Hiring", "Sales", "Research", "Personal", "Operations"]
-# Cosine-similarity threshold above which a proposed new category is merged
-# into an existing one instead of created.
-merge_threshold = 0.82
 
 [web]
 host = "127.0.0.1"
