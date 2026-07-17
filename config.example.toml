@@ -2,8 +2,8 @@
 # `config.toml` is gitignored (it holds your Granola token).
 
 [vault]
-# Absolute path to your Obsidian vault.
-path = "/Users/jonathang/Documents/Obsidian Vault"
+# Path to your Obsidian vault (`~` is expanded).
+path = "~/Documents/Obsidian Vault"
 # Vault name as Obsidian knows it (used for obsidian:// deep links).
 name = "Obsidian Vault"
 # Folder (relative to the vault) where insight notes are written.
