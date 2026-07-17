@@ -24,7 +24,7 @@ ATTACHMENTS_SUBDIR = "Attachments"
 
 # The only vault namespaces synthesis may write into (namespace isolation:
 # generated notes never land next to — or over — transcript notes).
-SYNTH_SUBDIRS = ("Digests", "People", "Studies", "Prep")
+SYNTH_SUBDIRS = ("Digests", "People", "Studies", "Prep", "Categories")
 
 SYNTH_BEGIN = "<!-- synth:begin — generated; edits inside this block are overwritten -->"
 SYNTH_END = "<!-- synth:end -->"

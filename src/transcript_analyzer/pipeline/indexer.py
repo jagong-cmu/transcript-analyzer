@@ -5,9 +5,9 @@ hand-edits are respected too) and upserts rows. No embeddings: retrieval is
 agentic (Claude reads every summary and pulls whole notes on demand), so the
 index only needs the parsed notes themselves.
 
-FEEDBACK-LOOP GUARD: synthesis writes Digests/, People/, Studies/, and Prep/
-into the same vault folder this indexer reads. Three defenses keep the system
-from summarizing its own summaries in an unattended 20-minute loop:
+FEEDBACK-LOOP GUARD: synthesis writes Digests/, People/, Studies/, Prep/, and
+Categories/ into the same vault folder this indexer reads. Three defenses keep
+the system from summarizing its own summaries in an unattended 20-minute loop:
   1. the glob is non-recursive (transcript notes are flat under the root),
   2. EXCLUDED_SUBDIRS is skipped explicitly even if that ever changes,
   3. parse_note() requires a transcript_id and rejects `synth: true` notes.

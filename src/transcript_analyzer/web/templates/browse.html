@@ -1,0 +1,143 @@
+{% extends "base.html" %}
+{% block title %}Browse · Transcript Analyzer{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Browse conversations</h1>
+  <p class="muted">{{ total }} conversation(s), organized by date.
+    {% if categories %}{{ categories | length }} categories.{% endif %}
+    <a href="/">← Back to briefing</a>
+  </p>
+</div>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Organize by category</h2>
+    {% if categories %}
+      <button type="button" id="cat-reset" class="btn-ghost">Clear all</button>
+    {% endif %}
+  </div>
+  <p class="muted small">Claude sorts every conversation into the labels you list,
+    then synthesizes a scoped briefing (themes + open threads) for each non-empty category.
+    Notes stay where they are — categories are a non-destructive overlay.</p>
+  <form id="cat-form" class="ask-form">
+    <input id="cat-input" name="categories" type="text" autocomplete="off"
+           value="{{ suggested_categories }}"
+           placeholder="e.g. Fundraising, Hiring, Product, Personal" required>
+    <button type="submit" class="btn">Categorize</button>
+  </form>
+  <p id="cat-status" class="synth-status muted" hidden></p>
+</section>
+
+{% if categories %}
+<section>
+  <h2>Categories</h2>
+  <div class="card-grid">
+    {% for name, count in categories %}
+      <a class="card cat-card" href="/category/{{ name | urlencode }}">
+        <div class="card-title">{{ name }}</div>
+        <div class="card-count">{{ count }}</div>
+      </a>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+<section>
+  <h2>Conversations by date</h2>
+  {% for month, items in timeline %}
+    <h3 class="month">{{ month }}</h3>
+    <ul class="list">
+      {% for r in items %}
+        <li>
+          <a href="/transcript/{{ r.transcript_id }}">{{ r.title }}</a>
+          <span class="meta">{{ r.date }} · {{ r.source }}</span>
+          {% if r.summary %}<p class="summary">{{ r.summary }}</p>{% endif %}
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p class="muted">No conversations yet — run a sync.</p>
+  {% endfor %}
+</section>
+
+<section>
+  <h2>Open action items</h2>
+  <ul class="checklist">
+    {% for a in action_items %}
+      <li><span class="box">☐</span> {{ a.text }}
+        <a class="src" href="/transcript/{{ a.id }}">↗ {{ a.title }}</a></li>
+    {% else %}
+      <li class="muted">No action items.</li>
+    {% endfor %}
+  </ul>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const catForm = document.getElementById('cat-form');
+const catInput = document.getElementById('cat-input');
+const catStatus = document.getElementById('cat-status');
+const catReset = document.getElementById('cat-reset');
+const catBtn = catForm ? catForm.querySelector('button[type="submit"]') : null;
+
+function showStatus(msg, isError) {
+  catStatus.hidden = false;
+  catStatus.textContent = msg;
+  catStatus.classList.toggle('error', !!isError);
+}
+
+if (catForm) {
+  catForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const cats = catInput.value.trim();
+    if (!cats) return;
+    catBtn.disabled = true;
+    showStatus('Categorizing all conversations… this can take a minute.', false);
+    try {
+      const resp = await fetch('/categorize', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: new URLSearchParams({categories: cats}),
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data.ok) {
+        showStatus(data.error || 'Categorization failed.', true);
+        catBtn.disabled = false;
+        return;
+      }
+      const s = data.summary;
+      const nRollups = s.rollups ? Object.keys(s.rollups).length : 0;
+      showStatus(
+        `Assigned ${s.assigned}/${s.total} (${s.unassigned} left). Wrote ${nRollups} category briefing(s). Reloading…`,
+        false
+      );
+      location.reload();    } catch (err) {
+      showStatus(String(err), true);
+      catBtn.disabled = false;
+    }
+  });
+}
+
+if (catReset) {
+  catReset.addEventListener('click', async () => {
+    if (!confirm('Clear all category assignments and index notes?')) return;
+    catReset.disabled = true;
+    showStatus('Clearing categories…', false);
+    try {
+      const resp = await fetch('/categorize/reset', {method: 'POST'});
+      const data = await resp.json();
+      if (!resp.ok || !data.ok) {
+        showStatus(data.error || 'Reset failed.', true);
+        catReset.disabled = false;
+        return;
+      }
+      location.reload();
+    } catch (err) {
+      showStatus(String(err), true);
+      catReset.disabled = false;
+    }
+  });
+}
+</script>
+{% endblock %}

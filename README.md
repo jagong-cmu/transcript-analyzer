@@ -4,8 +4,8 @@ Personal system that ingests your **Granola** + **Pocket AI** transcripts, extra
 the **Claude API**, stores them as notes in your **Obsidian** vault, and — the important part —
 **pushes synthesis back into the vault**: a daily digest, a live commitment tracker, dossiers on
 the people you talk to repeatedly, research-study rollups, and prep notes for tomorrow's meetings.
-A local **dashboard** lets you browse conversations and ask questions (agentic retrieval with
-citations).
+A local **dashboard** surfaces the synthesis as a CEO briefing (digest, commitments, people,
+prep) and lets you ask questions with citations.
 
 > **Privacy note:** transcript *storage* is local (your Obsidian vault + a local SQLite index),
 > but analysis is not — transcripts are sent to the Anthropic API for insight extraction,
@@ -27,7 +27,8 @@ Pocket API  ──┘   (junk filter -> insights)   └─> SQLite index    (der
                        • Prep/<date> <mtg>.md           │
                                                         │
                                   FastAPI dashboard (localhost:8787)
-                                    • timeline  • insights  • chat with citations
+                                    • today’s digest  • commitments  • people
+                                    • prep  • run synthesis  • chat  • browse
 ```
 
 - **Pocket AI** and **Granola** are pulled via their official public APIs (incremental, with
@@ -42,9 +43,11 @@ Pocket API  ──┘   (junk filter -> insights)   └─> SQLite index    (der
   (`<!-- synth:begin -->` … `<!-- synth:end -->`), so anything you write outside the markers
   survives regeneration. Every LLM claim must carry a verbatim quote from the conversation it
   cites; claims that fail this gate are dropped in code, not trusted from the prompt.
+- The **dashboard home** is a CEO briefing: it reads those synthesis notes (plus live
+  commitments from the index), links every claim back to its source conversation, and can
+  trigger synthesis from the UI.
 - **Commitments** are pure extraction (no LLM): every unchecked `- [ ]` across your notes,
-  linked back. Tick the box in the conversation note to close one.
-- **Chat** is agentic retrieval: Claude reads *every* conversation summary in context (no
+  linked back. Tick the box in the conversation note to close one.- **Chat** is agentic retrieval: Claude reads *every* conversation summary in context (no
   embeddings, no top-k) and pulls full transcripts on demand — speaker labels, dates, and
   proper nouns stay exact.
 - **Pocket audio** is downloaded into `Transcript Insights/Attachments/` and embedded in each
@@ -106,9 +109,10 @@ Notes are organized by date. To group them into categories *you* choose, run:
 ./.venv/bin/python scripts/categorize.py Fundraising Hiring Product Personal
 ```
 
-Claude assigns each note to one of your categories (or none) and writes non-destructive
-Category index notes under `Transcript Insights/Categories/`. Re-run anytime with a different
-list; `--reset` clears it.
+Claude assigns each note to one of your categories (or none), synthesizes a
+scoped briefing (themes + open threads) per category, and writes non-destructive
+Category notes under `Transcript Insights/Categories/`. Re-run anytime with a
+different list; `--reset` clears it.
 
 ### Background automation (launchd)
 
@@ -128,7 +132,7 @@ bash scripts/install_launchd.sh uninstall
 - `src/transcript_analyzer/sync.py` — orchestrator (`--source`, `--limit`, `--dry-run`, `--force`,
   `--no-synthesis`)
 - `src/transcript_analyzer/rag.py` — agentic retrieval chat with citations
-- `src/transcript_analyzer/web/` — FastAPI dashboard + templates
+- `src/transcript_analyzer/web/` — FastAPI briefing dashboard (reads synthesis notes + triggers runs)
 - `tests/` — pytest suite (citation gate, cost guard, junk filter, indexer guards, managed regions)
 - `data/` — SQLite index, spend ledger, logs, `llm.kill` switch (gitignored)
 

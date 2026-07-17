@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}{{ study.name }} · Studies{% endblock %}
+{% block content %}
+<div class="page-head">
+  <p class="eyebrow"><a href="/studies">Studies</a></p>
+  <h1>{{ study.name }}</h1>
+  {% if obsidian_url %}<p class="meta"><a href="{{ obsidian_url }}">Open in Obsidian ↗</a></p>{% endif %}
+</div>
+
+{% if study.overview %}
+<section class="panel">
+  <p class="digest-headline" style="font-size:1.1rem">{{ study.overview }}</p>
+</section>
+{% endif %}
+
+{% if study.findings %}
+<section class="panel">
+  <h2>Findings</h2>
+  <ul class="claim-list">
+    {% for c in study.findings %}
+      <li>
+        <span class="claim-text">{{ c.text }}</span>
+        {% if c.transcript_id %}<a class="cite" href="/transcript/{{ c.transcript_id }}">{{ c.title }}</a>{% endif %}
+      </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+{% if study.open_questions %}
+<section class="panel">
+  <h2>Open questions</h2>
+  <ul class="checklist">
+    {% for q in study.open_questions %}
+      <li>{{ q }}</li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+{% if study.sessions %}
+<section class="panel">
+  <h2>Sessions</h2>
+  <ul class="list">
+    {% for c in study.sessions %}
+      <li>
+        {% if c.transcript_id %}
+          <a href="/transcript/{{ c.transcript_id }}">{{ c.title or c.text }}</a>
+        {% else %}
+          {{ c.text }}
+        {% endif %}
+      </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+{% endblock %}

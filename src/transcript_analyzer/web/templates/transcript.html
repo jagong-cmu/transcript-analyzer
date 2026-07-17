@@ -40,6 +40,11 @@
 <div class="tags">{% for t in rec.topics %}<span class="tag">#{{ t }}</span>{% endfor %}</div>
 {% endif %}
 
+{% set ask_scope_label = "this conversation" %}
+{% set ask_transcript_id = rec.transcript_id %}
+{% set ask_placeholder = "e.g. What did we decide? What am I on the hook for?" %}
+{% include "_ask_panel.html" %}
+
 <section>
   <h2>Transcript</h2>
   <details>

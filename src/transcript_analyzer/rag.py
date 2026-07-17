@@ -6,6 +6,9 @@ notes on demand via the fetch_transcript tool. Whole notes mean speaker
 labels stay intact, dates come from frontmatter, and proper nouns are exact
 text — the three defects vector retrieval had.
 
+Optional scopes restrict the index to one category or one transcript so Ask
+on a category/transcript page never leaks answers from outside that view.
+
 The corpus block carries a cache_control breakpoint, so repeated questions
 within a session pay ~0.1x for the corpus prefix.
 """
@@ -17,7 +20,7 @@ from datetime import date
 from typing import Iterator, Optional
 
 from .config import Config, load_config
-from .db import all_transcripts, get_conn
+from .db import all_transcripts, get_conn, get_transcript, transcripts_in_category
 from .models import NoteRecord
 from .pipeline.llm import LLM
 
@@ -34,17 +37,17 @@ class Retrieved:
 
 
 SYSTEM = """You answer questions about the user's own meeting and conversation
-transcripts. You are given an index of EVERY conversation they have recorded:
-one numbered entry per conversation with its id, date, title, people, and
-summary. Read the whole index — do not skim.
+transcripts. You are given an index of conversations: one numbered entry per
+conversation with its id, date, title, people, and summary. Read the whole
+index — do not skim.
 
 When a summary is not enough (exact wording, who said what, numbers,
 specifics), call fetch_transcript with the conversation's id to read the full
 note. Fetch as many as you need, in parallel when independent.
 
 Cite conversations inline as [n], where n is the entry's number in the index.
-If the index doesn't contain the answer, say so plainly. Be concise and
-specific."""
+If the index doesn't contain the answer, say so plainly — do not invent
+conversations outside the index. Be concise and specific."""
 
 FETCH_TOOL = {
     "name": "fetch_transcript",
@@ -91,20 +94,62 @@ def _render_full(rec: NoteRecord) -> str:
     )
 
 
+def _load_scoped_records(
+    cfg: Config,
+    *,
+    category: Optional[str] = None,
+    transcript_id: Optional[str] = None,
+) -> tuple[list[NoteRecord], str]:
+    """Return (records, scope_label). Raises ValueError if scope is empty/invalid."""
+    with get_conn(cfg.db_path) as conn:
+        if transcript_id:
+            rec = get_transcript(conn, transcript_id)
+            if rec is None:
+                raise ValueError(f"No transcript with id {transcript_id!r}.")
+            return [rec], f"this single conversation (“{rec.title}”)"
+        if category:
+            records = transcripts_in_category(conn, category)
+            if not records:
+                raise ValueError(f"Category {category!r} has no conversations.")
+            return records, f"the “{category}” category only ({len(records)} conversations)"
+        return all_transcripts(conn), "all indexed conversations"
+
+
 def stream_events(
     question: str,
     cfg: Optional[Config] = None,
     llm: Optional[LLM] = None,
+    *,
+    category: Optional[str] = None,
+    transcript_id: Optional[str] = None,
 ) -> Iterator[tuple[str, object]]:
     """Yield ("token", str) as the answer streams, then ("sources", [dict])
-    mapping the [n] citations in the answer to transcripts."""
+    mapping the [n] citations in the answer to transcripts.
+
+    Pass category= or transcript_id= to restrict the index to that scope.
+    """
     cfg = cfg or load_config()
     llm = llm or LLM(cfg)
 
-    with get_conn(cfg.db_path) as conn:
-        records = all_transcripts(conn)
+    records, scope_label = _load_scoped_records(
+        cfg, category=category, transcript_id=transcript_id
+    )
     corpus, by_num = _corpus(records)
     by_id = {r.transcript_id: r for r in records}
+
+    # Single-transcript scope: include the full note up front so Ask doesn't
+    # need a tool round-trip for the only document in scope.
+    extra = ""
+    if transcript_id and records:
+        extra = (
+            "\n\nFULL NOTE FOR THIS CONVERSATION (already in scope — no need to fetch):\n"
+            + _render_full(records[0])
+        )
+
+    scope_note = (
+        f"SCOPE: Answer using {scope_label}. Do not use knowledge from "
+        f"conversations outside this index.\n\n"
+    )
 
     messages: list[dict] = [
         {
@@ -112,12 +157,15 @@ def stream_events(
             "content": [
                 {
                     "type": "text",
-                    "text": corpus,
+                    "text": corpus + extra,
                     "cache_control": {"type": "ephemeral"},
                 },
                 {
                     "type": "text",
-                    "text": f"Today's date: {date.today().isoformat()}\n\nQuestion: {question}",
+                    "text": (
+                        f"Today's date: {date.today().isoformat()}\n\n"
+                        f"{scope_note}Question: {question}"
+                    ),
                 },
             ],
         }
@@ -152,7 +200,10 @@ def stream_events(
             else:
                 results.append(
                     {"type": "tool_result", "tool_use_id": block.id,
-                     "content": f"No transcript with id {tid!r} in the index.",
+                     "content": (
+                         f"No transcript with id {tid!r} in the current scope "
+                         f"({scope_label})."
+                     ),
                      "is_error": True}
                 )
         messages.append({"role": "user", "content": results})
@@ -181,11 +232,16 @@ def answer(
     question: str,
     cfg: Optional[Config] = None,
     llm: Optional[LLM] = None,
+    *,
+    category: Optional[str] = None,
+    transcript_id: Optional[str] = None,
 ) -> dict:
     """Non-streaming convenience wrapper around stream_events()."""
     tokens: list[str] = []
     sources: list[dict] = []
-    for kind, payload in stream_events(question, cfg=cfg, llm=llm):
+    for kind, payload in stream_events(
+        question, cfg=cfg, llm=llm, category=category, transcript_id=transcript_id
+    ):
         if kind == "token":
             tokens.append(payload)  # type: ignore[arg-type]
         elif kind == "sources":

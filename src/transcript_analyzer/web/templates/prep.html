@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Prep · Briefing{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Meeting prep</h1>
+  <p class="muted">Tomorrow’s meetings joined to conversation history.
+    Requires <code>[calendar].ics_url</code> in config.</p>
+</div>
+
+{% if prep %}
+  {% for p in prep %}
+    <section class="panel" id="{{ p.name }}">
+      <div class="panel-head">
+        <h2>{{ p.headline or p.name }}</h2>
+        {% if p.date %}<span class="meta">{{ p.date }}</span>{% endif %}
+      </div>
+      {% if p.points %}
+        <ul class="claim-list">
+          {% for c in p.points %}
+            <li>
+              <span class="claim-text">{{ c.text }}</span>
+              {% if c.transcript_id %}<a class="cite" href="/transcript/{{ c.transcript_id }}">{{ c.title }}</a>{% endif %}
+            </li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+      {% if p.still_open %}
+        <h3>Still open</h3>
+        <ul class="checklist">
+          {% for c in p.still_open %}
+            <li><span class="box">☐</span> {{ c.text }}
+              {% if c.transcript_id %}<a class="cite" href="/transcript/{{ c.transcript_id }}">{{ c.title }}</a>{% endif %}
+            </li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+    </section>
+  {% endfor %}
+{% else %}
+  <div class="empty-state panel">
+    <p>No prep notes yet. Set an ICS URL and run synthesis the day before meetings with people you’ve talked to.</p>
+  </div>
+{% endif %}
+{% endblock %}

@@ -1,30 +1,33 @@
-"""Local FastAPI dashboard: browse grouped conversations + insights, and chat (RAG)."""
+"""Local FastAPI dashboard: synthesis briefing + browse + chat (RAG)."""
 from __future__ import annotations
 
 import json
+from collections import defaultdict
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from ..obsidian import writer
-
+from .. import rag
 from ..config import load_config
-from collections import defaultdict
-
 from ..db import (
     all_transcripts,
     categories_for,
     category_counts,
     get_conn,
+    get_meta,
     get_transcript,
+    set_meta,
     transcripts_in_category,
 )
-from ..pipeline.llm import LLM
-from .. import rag
+from ..obsidian import writer
+from ..pipeline import organize, synthesize
+from ..pipeline.llm import LLM, LLMError
+from ..pipeline.synthesize import LAST_RUN_KEY
+from . import synth_reader
 
 BASE = Path(__file__).resolve().parent
 app = FastAPI(title="Transcript Analyzer")
@@ -46,17 +49,50 @@ def obsidian_uri(note_path: str) -> str:
 templates.env.filters["obsidian"] = obsidian_uri
 
 
+def _cats():
+    with get_conn(cfg.db_path) as conn:
+        return category_counts(conn)
+
+
+def _by_stem():
+    with get_conn(cfg.db_path) as conn:
+        return synth_reader.stem_index(all_transcripts(conn))
+
+
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
+    briefing = synth_reader.load_briefing(cfg)
+    return templates.TemplateResponse(
+        request,
+        "home.html",
+        {
+            "categories": _cats(),
+            "digest": briefing["digest"],
+            "commitments": briefing["commitments"][:12],
+            "open_count": briefing["open_count"],
+            "people": briefing["people"][:8],
+            "people_total": len(briefing["people"]),
+            "studies": briefing["studies"],
+            "prep": briefing["prep"][:5],
+            "status": briefing["status"],
+            "total": briefing["total"],
+            "digest_dates": synth_reader.list_digest_dates(cfg)[:14],
+        },
+    )
+
+
+@app.get("/browse", response_class=HTMLResponse)
+def browse(request: Request):
     with get_conn(cfg.db_path) as conn:
         cats = category_counts(conn)
-        records = all_transcripts(conn)  # already ordered by date DESC
+        records = all_transcripts(conn)
         action_items = []
         for rec in records:
             for a in rec.action_items:
-                action_items.append({"text": a, "title": rec.title, "id": rec.transcript_id})
+                action_items.append(
+                    {"text": a, "title": rec.title, "id": rec.transcript_id}
+                )
 
-    # Group notes by month for the date-organized timeline.
     by_month: dict[str, list] = defaultdict(list)
     for rec in records:
         month = rec.date[:7] if len(rec.date) >= 7 else "undated"
@@ -65,25 +101,212 @@ def home(request: Request):
 
     return templates.TemplateResponse(
         request,
-        "home.html",
+        "browse.html",
         {
             "categories": cats,
             "timeline": timeline,
             "action_items": action_items[:25],
             "total": len(records),
+            "suggested_categories": ", ".join(name for name, _ in cats),
         },
     )
 
 
+def _parse_categories(raw: str) -> list[str]:
+    raw = raw.strip()
+    if "," in raw:
+        return [c.strip() for c in raw.split(",") if c.strip()]
+    return [c for c in raw.split() if c]
+
+
+@app.post("/categorize")
+def categorize_now(categories: str = Form(...)):
+    """Run Claude categorization across all notes into the given labels.
+    Notes stay date-organized; this rewrites the Categories/ overlay + DB."""
+    cats = _parse_categories(categories)
+    if not cats:
+        return JSONResponse(
+            {"ok": False, "error": "Provide at least one category."}, status_code=400
+        )
+    try:
+        summary = organize.categorize(cfg, categories=cats, verbose=False)
+    except LLMError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=502)
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+    return JSONResponse({"ok": True, "summary": summary})
+
+
+@app.post("/categorize/reset")
+def categorize_reset():
+    """Clear all category assignments and MOC notes."""
+    try:
+        summary = organize.reset_categories(cfg, verbose=False)
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+    return JSONResponse({"ok": True, "summary": summary})
+
+
+@app.get("/commitments", response_class=HTMLResponse)
+def commitments_page(request: Request):
+    with get_conn(cfg.db_path) as conn:
+        records = all_transcripts(conn)
+    groups = synth_reader.commitments_from_records(records)
+    return templates.TemplateResponse(
+        request,
+        "commitments.html",
+        {
+            "categories": _cats(),
+            "commitments": groups,
+            "open_count": sum(len(g.items) for g in groups),
+            "status": synth_reader.synthesis_status(cfg),
+        },
+    )
+
+
+@app.get("/people", response_class=HTMLResponse)
+def people_index(request: Request):
+    people = synth_reader.list_people(cfg, _by_stem())
+    return templates.TemplateResponse(
+        request,
+        "people.html",
+        {"categories": _cats(), "people": people, "status": synth_reader.synthesis_status(cfg)},
+    )
+
+
+@app.get("/people/{name}", response_class=HTMLResponse)
+def person_page(request: Request, name: str):
+    name = unquote(name)
+    card = synth_reader.load_person(cfg, name, _by_stem())
+    if card is None:
+        return HTMLResponse("Person not found", status_code=404)
+    return templates.TemplateResponse(
+        request,
+        "person.html",
+        {
+            "categories": _cats(),
+            "person": card,
+            "obsidian_url": obsidian_uri(str(card.path)),
+            "status": synth_reader.synthesis_status(cfg),
+        },
+    )
+
+
+@app.get("/studies", response_class=HTMLResponse)
+def studies_index(request: Request):
+    studies = synth_reader.list_studies(cfg, _by_stem())
+    return templates.TemplateResponse(
+        request,
+        "studies.html",
+        {"categories": _cats(), "studies": studies, "status": synth_reader.synthesis_status(cfg)},
+    )
+
+
+@app.get("/studies/{name}", response_class=HTMLResponse)
+def study_page(request: Request, name: str):
+    name = unquote(name)
+    card = synth_reader.load_study(cfg, name, _by_stem())
+    if card is None:
+        return HTMLResponse("Study not found", status_code=404)
+    return templates.TemplateResponse(
+        request,
+        "study.html",
+        {
+            "categories": _cats(),
+            "study": card,
+            "obsidian_url": obsidian_uri(str(card.path)),
+            "status": synth_reader.synthesis_status(cfg),
+        },
+    )
+
+
+@app.get("/prep", response_class=HTMLResponse)
+def prep_index(request: Request):
+    prep = synth_reader.list_prep(cfg, _by_stem())
+    return templates.TemplateResponse(
+        request,
+        "prep.html",
+        {"categories": _cats(), "prep": prep, "status": synth_reader.synthesis_status(cfg)},
+    )
+
+
+@app.get("/digests/{day}", response_class=HTMLResponse)
+def digest_page(request: Request, day: str):
+    digest = synth_reader.load_digest(cfg, day, _by_stem())
+    if not digest.exists:
+        return HTMLResponse("Digest not found", status_code=404)
+    return templates.TemplateResponse(
+        request,
+        "digest.html",
+        {
+            "categories": _cats(),
+            "digest": digest,
+            "digest_dates": synth_reader.list_digest_dates(cfg)[:30],
+            "obsidian_url": obsidian_uri(str(digest.path)),
+            "status": synth_reader.synthesis_status(cfg),
+        },
+    )
+
+
+@app.post("/synthesize")
+def synthesize_now(force: str = Form("false")):
+    """Run the synthesis engine. force=true bypasses the once-per-day cadence guard
+    and rewrites dossiers/studies even when inputs are unchanged."""
+    if not cfg.synthesis.enabled:
+        return JSONResponse(
+            {"ok": False, "error": "synthesis is disabled in config.toml"}, status_code=400
+        )
+    do_force = force.lower() in ("1", "true", "yes", "on")
+
+    from datetime import date
+
+    llm = LLM(cfg)
+    try:
+        if do_force:
+            summary = synthesize.run(cfg, llm, force=True, verbose=False)
+            with get_conn(cfg.db_path) as conn:
+                set_meta(conn, LAST_RUN_KEY, date.today().isoformat())
+        else:
+            summary = synthesize.maybe_run(cfg, llm, verbose=False)
+            if summary is None:
+                with get_conn(cfg.db_path) as conn:
+                    last = get_meta(conn, LAST_RUN_KEY)
+                return JSONResponse(
+                    {
+                        "ok": True,
+                        "skipped": True,
+                        "message": f"Already synthesized today ({last}). Use force to re-run.",
+                        "last_run": last,
+                    }
+                )
+    except LLMError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=502)
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+    return JSONResponse({"ok": True, "skipped": False, "summary": summary})
+
+
 @app.get("/category/{name}", response_class=HTMLResponse)
 def category(request: Request, name: str):
+    name = unquote(name)
     with get_conn(cfg.db_path) as conn:
         items = transcripts_in_category(conn, name)
         cats = category_counts(conn)
+        records = all_transcripts(conn)
+    insight = synth_reader.load_category_insight(
+        cfg, name, synth_reader.stem_index(records)
+    )
     return templates.TemplateResponse(
         request,
         "category.html",
-        {"category": name, "items": items, "categories": cats},
+        {
+            "category": name,
+            "items": items,
+            "categories": cats,
+            "insight": insight,
+            "obsidian_url": obsidian_uri(str(insight.path)) if insight.exists else "",
+        },
     )
 
 
@@ -95,12 +318,19 @@ def transcript(request: Request, tid: str):
         note_cats = categories_for(conn, tid) if rec else []
     if rec is None:
         return HTMLResponse("Not found", status_code=404)
-    has_audio = writer.audio_path_for(cfg, Path(rec.note_path)).exists() if rec.note_path else False
+    has_audio = (
+        writer.audio_path_for(cfg, Path(rec.note_path)).exists() if rec.note_path else False
+    )
     return templates.TemplateResponse(
         request,
         "transcript.html",
-        {"rec": rec, "categories": cats, "note_categories": note_cats,
-         "obsidian_url": obsidian_uri(rec.note_path), "has_audio": has_audio},
+        {
+            "rec": rec,
+            "categories": cats,
+            "note_categories": note_cats,
+            "obsidian_url": obsidian_uri(rec.note_path),
+            "has_audio": has_audio,
+        },
     )
 
 
@@ -124,23 +354,37 @@ def chat_page(request: Request):
 
 
 @app.post("/chat/ask")
-def chat_ask(question: str = Form(...)):
-    """Stream the answer via Server-Sent Events. Tokens stream as they arrive;
-    the sources event (mapping [n] citations) arrives once the answer is done."""
+def chat_ask(
+    question: str = Form(...),
+    category: str = Form(""),
+    transcript_id: str = Form(""),
+):
+    """Stream the answer via Server-Sent Events. Optional category / transcript_id
+    scopes the corpus to the page the user is viewing."""
     llm = LLM(cfg)
+    cat = category.strip() or None
+    tid = transcript_id.strip() or None
 
     def event_gen():
         try:
-            for kind, payload in rag.stream_events(question, cfg=cfg, llm=llm):
+            for kind, payload in rag.stream_events(
+                question, cfg=cfg, llm=llm, category=cat, transcript_id=tid
+            ):
                 if kind == "token":
                     yield f"data: {json.dumps(payload)}\n\n"
                 elif kind == "sources":
                     src_payload = [
-                        {"n": s["n"], "title": s["title"], "id": s["id"],
-                         "obsidian": obsidian_uri(s["note_path"])}
+                        {
+                            "n": s["n"],
+                            "title": s["title"],
+                            "id": s["id"],
+                            "obsidian": obsidian_uri(s["note_path"]),
+                        }
                         for s in payload
                     ]
                     yield f"event: sources\ndata: {json.dumps(src_payload)}\n\n"
+        except ValueError as e:
+            yield f"data: {json.dumps(' [error: ' + str(e) + ']')}\n\n"
         except Exception as e:  # noqa: BLE001
             yield f"data: {json.dumps(' [error: ' + str(e) + ']')}\n\n"
         yield "event: done\ndata: {}\n\n"

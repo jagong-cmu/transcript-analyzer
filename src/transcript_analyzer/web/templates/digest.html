@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Digest · {{ digest.date }}{% endblock %}
+{% block content %}
+<div class="page-head">
+  <p class="eyebrow"><a href="/">Today</a></p>
+  <h1>Digest · {{ digest.date }}</h1>
+  {% if obsidian_url %}<p class="meta"><a href="{{ obsidian_url }}">Open in Obsidian ↗</a></p>{% endif %}
+</div>
+
+{% if digest_dates %}
+<div class="digest-archive" style="margin-bottom:18px">
+  {% for d in digest_dates %}
+    <a class="pill soft {% if d == digest.date %}active-pill{% endif %}" href="/digests/{{ d }}">{{ d }}</a>
+  {% endfor %}
+</div>
+{% endif %}
+
+<section class="panel digest-panel">
+  {% if digest.headline %}
+    <p class="digest-headline">{{ digest.headline }}</p>
+  {% endif %}
+  {% for section in digest.sections %}
+    <div class="digest-section">
+      <h3>{{ section.title }}</h3>
+      <ul class="claim-list">
+        {% for c in section.claims %}
+          <li>
+            <span class="claim-text">{{ c.text }}</span>
+            {% if c.transcript_id %}
+              <a class="cite" href="/transcript/{{ c.transcript_id }}">{{ c.title }}</a>
+            {% elif c.wiki_stem %}
+              <span class="cite muted">{{ c.wiki_stem }}</span>
+            {% endif %}
+          </li>
+        {% endfor %}
+      </ul>
+    </div>
+  {% endfor %}
+</section>
+{% endblock %}

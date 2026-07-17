@@ -1,0 +1,87 @@
+{# Scoped Ask panel. Expects optional: ask_scope_label, ask_category, ask_transcript_id #}
+<section class="panel ask-panel" id="ask-panel"
+         data-category="{{ ask_category or '' }}"
+         data-transcript-id="{{ ask_transcript_id or '' }}">
+  <div class="panel-head">
+    <h2>Ask{% if ask_scope_label %} · {{ ask_scope_label }}{% endif %}</h2>
+  </div>
+  <p class="muted small">
+    {% if ask_transcript_id %}
+      Answers use only this conversation.
+    {% elif ask_category %}
+      Answers use only conversations in <strong>{{ ask_category }}</strong>.
+    {% else %}
+      Claude reads every conversation summary, pulls full transcripts as needed, and cites sources.
+    {% endif %}
+  </p>
+  <form class="ask-form ask-form-scoped">
+    <input class="ask-q" type="text" autocomplete="off"
+           placeholder="{{ ask_placeholder or 'Ask a question…' }}" required>
+    <button type="submit">Ask</button>
+  </form>
+  <div class="ask-sources sources"></div>
+  <div class="ask-answer answer muted">Ask a question to get started.</div>
+</section>
+<script>
+(function () {
+  const panel = document.getElementById('ask-panel');
+  if (!panel || panel.dataset.bound) return;
+  panel.dataset.bound = '1';
+  const form = panel.querySelector('.ask-form-scoped');
+  const answerEl = panel.querySelector('.ask-answer');
+  const sourcesEl = panel.querySelector('.ask-sources');
+  const category = panel.dataset.category || '';
+  const transcriptId = panel.dataset.transcriptId || '';
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const q = form.querySelector('.ask-q').value.trim();
+    if (!q) return;
+    answerEl.classList.remove('muted');
+    answerEl.textContent = '';
+    sourcesEl.innerHTML = '';
+
+    const body = new URLSearchParams({question: q});
+    if (category) body.set('category', category);
+    if (transcriptId) body.set('transcript_id', transcriptId);
+
+    const resp = await fetch('/chat/ask', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body,
+    });
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const {value, done} = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, {stream: true});
+      const events = buffer.split('\n\n');
+      buffer = events.pop();
+      for (const evt of events) {
+        const lines = evt.split('\n');
+        let type = 'message', data = '';
+        for (const line of lines) {
+          if (line.startsWith('event:')) type = line.slice(6).trim();
+          else if (line.startsWith('data:')) data += line.slice(5).trim();
+        }
+        if (!data) continue;
+        if (type === 'sources') {
+          const srcs = JSON.parse(data);
+          if (srcs.length) {
+            sourcesEl.innerHTML = '<div class="sources-title">Sources</div>' +
+              srcs.map(s => `<a class="source-chip" href="/transcript/${s.id}">[${s.n}] ${s.title}</a>`).join(' ');
+          }
+        } else if (type === 'done') {
+          // finished
+        } else {
+          answerEl.textContent += JSON.parse(data);
+        }
+      }
+    }
+  });
+})();
+</script>

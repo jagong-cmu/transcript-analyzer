@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Commitments · Briefing{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Open commitments</h1>
+  <p class="muted">{{ open_count }} open item{{ 's' if open_count != 1 else '' }} across
+    {{ commitments | length }} conversation{{ 's' if commitments | length != 1 else '' }}.
+    Tick the checkbox in Obsidian to close; the next sync refreshes this list.</p>
+</div>
+
+{% if commitments %}
+  {% for g in commitments %}
+    <section class="panel commit-group">
+      <div class="panel-head">
+        <h2>
+          {% if g.transcript_id %}
+            <a href="/transcript/{{ g.transcript_id }}">{{ g.title }}</a>
+          {% else %}
+            {{ g.title }}
+          {% endif %}
+        </h2>
+        <span class="meta">{{ g.date }}</span>
+      </div>
+      <ul class="checklist">
+        {% for item in g.items %}
+          <li><span class="box">☐</span> {{ item }}</li>
+        {% endfor %}
+      </ul>
+    </section>
+  {% endfor %}
+{% else %}
+  <div class="empty-state panel">
+    <p>No open commitments. Clean slate.</p>
+  </div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Studies · Briefing{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Studies</h1>
+  <p class="muted">Cross-conversation research rollups from <code>[[synthesis.studies]]</code> in config.</p>
+</div>
+
+{% if studies %}
+  <div class="person-grid">
+    {% for s in studies %}
+      <a class="person-card" href="/studies/{{ s.name | urlencode }}">
+        <div class="person-name">{{ s.name }}</div>
+        {% if s.overview %}<p class="summary">{{ s.overview[:180] }}{% if s.overview|length > 180 %}…{% endif %}</p>{% endif %}
+        <div class="meta">{{ s.findings | length }} finding{{ 's' if s.findings | length != 1 else '' }}
+          · {{ s.sessions | length }} session{{ 's' if s.sessions | length != 1 else '' }}</div>
+      </a>
+    {% endfor %}
+  </div>
+{% else %}
+  <div class="empty-state panel">
+    <p>No studies configured. Add <code>[[synthesis.studies]]</code> blocks in config.toml, then run synthesis.</p>
+  </div>
+{% endif %}
+{% endblock %}

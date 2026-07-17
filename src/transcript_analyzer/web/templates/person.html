@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}{{ person.name }} · People{% endblock %}
+{% block content %}
+<div class="page-head">
+  <p class="eyebrow"><a href="/people">People</a></p>
+  <h1>{{ person.name }}</h1>
+  <p class="meta">
+    {{ person.conversation_count }} conversation{{ 's' if person.conversation_count != 1 else '' }}
+    {% if obsidian_url %}· <a href="{{ obsidian_url }}">Open in Obsidian ↗</a>{% endif %}
+  </p>
+</div>
+
+{% if person.who %}
+<section class="panel">
+  <p class="digest-headline" style="font-size:1.1rem">{{ person.who }}</p>
+</section>
+{% endif %}
+
+{% if person.cares_about %}
+<section class="panel">
+  <h2>What they care about</h2>
+  <ul class="claim-list">
+    {% for c in person.cares_about %}
+      <li>
+        <span class="claim-text">{{ c.text }}</span>
+        {% if c.transcript_id %}<a class="cite" href="/transcript/{{ c.transcript_id }}">{{ c.title }}</a>{% endif %}
+      </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+{% if person.open_threads %}
+<section class="panel">
+  <h2>Open threads</h2>
+  <ul class="claim-list">
+    {% for c in person.open_threads %}
+      <li>
+        <span class="claim-text">{{ c.text }}</span>
+        {% if c.transcript_id %}<a class="cite" href="/transcript/{{ c.transcript_id }}">{{ c.title }}</a>{% endif %}
+      </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+{% if person.conversations %}
+<section class="panel">
+  <h2>Conversations</h2>
+  <ul class="list">
+    {% for c in person.conversations %}
+      <li>
+        {% if c.transcript_id %}
+          <a href="/transcript/{{ c.transcript_id }}">{{ c.title or c.text }}</a>
+        {% else %}
+          {{ c.text }}
+        {% endif %}
+      </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+{% endblock %}

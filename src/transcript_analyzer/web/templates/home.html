@@ -1,52 +1,204 @@
 {% extends "base.html" %}
+{% block title %}Today · Briefing{% endblock %}
+{% block content_class %}content-wide{% endblock %}
 {% block content %}
-<div class="page-head">
-  <h1>Dashboard</h1>
-  <p class="muted">{{ total }} conversation(s), organized by date.
-    {% if categories %}{{ categories | length }} categories.{% endif %}</p>
+<div class="briefing-head">
+  <div>
+    <p class="eyebrow">CEO briefing</p>
+    <h1>What matters now</h1>
+    <p class="muted">
+      {{ total }} conversation{{ 's' if total != 1 else '' }} indexed.
+      {% if status.last_run %}
+        Synthesis last ran {{ status.last_run }}{% if status.ran_today %} (today){% endif %}.
+      {% else %}
+        Synthesis hasn’t run yet.
+      {% endif %}
+    </p>
+  </div>
+  <div class="briefing-actions">
+    <button type="button" id="synth-btn" class="btn"
+            {% if not status.enabled %}disabled title="Enable [synthesis] in config.toml"{% endif %}>
+      {% if status.ran_today %}Re-run synthesis{% else %}Run synthesis{% endif %}
+    </button>
+    <label class="force-label" title="Bypass once-per-day guard and refresh dossiers">
+      <input type="checkbox" id="synth-force" {% if status.ran_today %}checked{% endif %}> Force
+    </label>
+    <p id="synth-status" class="synth-status muted" hidden></p>
+  </div>
 </div>
 
-{% if categories %}
-<section>
-  <h2>Categories</h2>
-  <div class="card-grid">
-    {% for name, count in categories %}
-      <a class="card cat-card" href="/category/{{ name | urlencode }}">
-        <div class="card-title">{{ name }}</div>
-        <div class="card-count">{{ count }}</div>
-      </a>
-    {% endfor %}
+<div class="briefing-grid">
+  <div class="briefing-main">
+    <section class="panel digest-panel">
+      {% if digest.exists %}
+        <div class="panel-head">
+          <h2>Digest · {{ digest.date }}</h2>
+          <a class="muted small" href="/digests/{{ digest.date }}">Full note →</a>
+        </div>
+        {% if digest.headline %}
+          <p class="digest-headline">{{ digest.headline }}</p>
+        {% endif %}
+        {% for section in digest.sections %}
+          <div class="digest-section">
+            <h3>{{ section.title }}</h3>
+            <ul class="claim-list">
+              {% for c in section.claims %}
+                <li>
+                  <span class="claim-text">{{ c.text }}</span>
+                  {% if c.transcript_id %}
+                    <a class="cite" href="/transcript/{{ c.transcript_id }}">{{ c.title }}</a>
+                  {% elif c.wiki_stem %}
+                    <span class="cite muted">{{ c.wiki_stem }}</span>
+                  {% endif %}
+                </li>
+              {% endfor %}
+            </ul>
+          </div>
+        {% else %}
+          <p class="muted">Digest exists but has no cited claims yet.</p>
+        {% endfor %}
+      {% else %}
+        <div class="panel-head"><h2>Digest</h2></div>
+        <div class="empty-state">
+          <p>No digest yet. Run synthesis to generate today’s briefing from recent conversations.</p>
+        </div>
+      {% endif %}
+
+      {% if digest_dates %}
+        <div class="digest-archive">
+          <span class="muted small">Recent:</span>
+          {% for d in digest_dates[:7] %}
+            <a class="pill soft" href="/digests/{{ d }}">{{ d }}</a>
+          {% endfor %}
+        </div>
+      {% endif %}
+    </section>
   </div>
-</section>
-{% endif %}
 
-<section>
-  <h2>Conversations by date</h2>
-  {% for month, items in timeline %}
-    <h3 class="month">{{ month }}</h3>
-    <ul class="list">
-      {% for r in items %}
-        <li>
-          <a href="/transcript/{{ r.transcript_id }}">{{ r.title }}</a>
-          <span class="meta">{{ r.date }} · {{ r.source }}</span>
-          {% if r.summary %}<p class="summary">{{ r.summary }}</p>{% endif %}
-        </li>
-      {% endfor %}
-    </ul>
-  {% else %}
-    <p class="muted">No conversations yet — run a sync.</p>
-  {% endfor %}
-</section>
+  <aside class="briefing-rail">
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Open commitments</h2>
+        <span class="stat-pill">{{ open_count }}</span>
+      </div>
+      {% if commitments %}
+        <ul class="rail-list">
+          {% for g in commitments %}
+            {% for item in g.items[:2] %}
+              <li>
+                <span class="box">☐</span> {{ item }}
+                {% if g.transcript_id %}
+                  <a class="cite" href="/transcript/{{ g.transcript_id }}">{{ g.title }}</a>
+                {% endif %}
+              </li>
+            {% endfor %}
+          {% endfor %}
+        </ul>
+        <a class="panel-more" href="/commitments">All commitments →</a>
+      {% else %}
+        <p class="muted small">Clean slate — no open action items.</p>
+      {% endif %}
+    </section>
 
-<section>
-  <h2>Open action items</h2>
-  <ul class="checklist">
-    {% for a in action_items %}
-      <li><span class="box">☐</span> {{ a.text }}
-        <a class="src" href="/transcript/{{ a.id }}">↗ {{ a.title }}</a></li>
-    {% else %}
-      <li class="muted">No action items.</li>
-    {% endfor %}
-  </ul>
-</section>
+    {% if prep %}
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Meeting prep</h2>
+      </div>
+      <ul class="rail-list">
+        {% for p in prep %}
+          <li>
+            <a href="/prep#{{ p.name | urlencode }}"><strong>{{ p.headline or p.name }}</strong></a>
+            {% if p.date %}<span class="meta">{{ p.date }}</span>{% endif %}
+          </li>
+        {% endfor %}
+      </ul>
+      <a class="panel-more" href="/prep">All prep →</a>
+    </section>
+    {% endif %}
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>People</h2>
+        {% if people_total %}<span class="stat-pill">{{ people_total }}</span>{% endif %}
+      </div>
+      {% if people %}
+        <ul class="person-rail">
+          {% for p in people %}
+            <li>
+              <a href="/people/{{ p.name | urlencode }}">
+                <span class="person-name">{{ p.name }}</span>
+                <span class="meta">{{ p.conversation_count }} talks</span>
+              </a>
+              {% if p.open_threads %}
+                <p class="thread-preview">{{ p.open_threads[0].text }}</p>
+              {% elif p.who %}
+                <p class="thread-preview">{{ p.who[:120] }}{% if p.who|length > 120 %}…{% endif %}</p>
+              {% endif %}
+            </li>
+          {% endfor %}
+        </ul>
+        <a class="panel-more" href="/people">All dossiers →</a>
+      {% else %}
+        <p class="muted small">Dossiers appear after someone shows up in enough conversations.</p>
+      {% endif %}
+    </section>
+
+    {% if studies %}
+    <section class="panel">
+      <div class="panel-head"><h2>Studies</h2></div>
+      <ul class="rail-list">
+        {% for s in studies %}
+          <li>
+            <a href="/studies/{{ s.name | urlencode }}"><strong>{{ s.name }}</strong></a>
+            {% if s.overview %}<p class="summary">{{ s.overview[:140] }}{% if s.overview|length > 140 %}…{% endif %}</p>{% endif %}
+          </li>
+        {% endfor %}
+      </ul>
+    </section>
+    {% endif %}
+  </aside>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const btn = document.getElementById('synth-btn');
+const forceEl = document.getElementById('synth-force');
+const statusEl = document.getElementById('synth-status');
+if (btn) {
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    statusEl.hidden = false;
+    statusEl.textContent = 'Running synthesis… this can take a few minutes.';
+    statusEl.classList.remove('error');
+    try {
+      const body = new URLSearchParams({ force: forceEl.checked ? 'true' : 'false' });
+      const resp = await fetch('/synthesize', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body,
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data.ok) {
+        statusEl.textContent = data.error || 'Synthesis failed.';
+        statusEl.classList.add('error');
+        btn.disabled = false;
+        return;
+      }
+      if (data.skipped) {
+        statusEl.textContent = data.message || 'Already ran today. Check Force to re-run.';
+        btn.disabled = false;
+        return;
+      }
+      statusEl.textContent = 'Done. Reloading…';
+      location.reload();
+    } catch (err) {
+      statusEl.textContent = String(err);
+      statusEl.classList.add('error');
+      btn.disabled = false;
+    }
+  });
+}
+</script>
 {% endblock %}

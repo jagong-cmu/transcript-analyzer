@@ -3,68 +3,10 @@
 {% block content %}
 <div class="page-head">
   <h1>Ask your transcripts</h1>
-  <p class="muted">Claude reads every conversation summary, pulls full transcripts as needed, and answers with citations.</p>
+  <p class="muted">Searches <strong>all</strong> conversations. To stay inside one category or one note, open that page and use Ask there.</p>
 </div>
 
-<form id="ask-form" class="ask-form">
-  <input id="q" name="question" type="text" autocomplete="off"
-         placeholder="e.g. What did we decide about pricing?" required>
-  <button type="submit">Ask</button>
-</form>
-
-<div id="sources" class="sources"></div>
-<div id="answer" class="answer muted">Ask a question to get started.</div>
-
-<script>
-const form = document.getElementById('ask-form');
-const answerEl = document.getElementById('answer');
-const sourcesEl = document.getElementById('sources');
-
-form.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const q = document.getElementById('q').value.trim();
-  if (!q) return;
-  answerEl.classList.remove('muted');
-  answerEl.textContent = '';
-  sourcesEl.innerHTML = '';
-
-  const resp = await fetch('/chat/ask', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-    body: new URLSearchParams({question: q}),
-  });
-
-  const reader = resp.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-
-  while (true) {
-    const {value, done} = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, {stream: true});
-    const events = buffer.split('\n\n');
-    buffer = events.pop();
-    for (const evt of events) {
-      const lines = evt.split('\n');
-      let type = 'message', data = '';
-      for (const line of lines) {
-        if (line.startsWith('event:')) type = line.slice(6).trim();
-        else if (line.startsWith('data:')) data += line.slice(5).trim();
-      }
-      if (!data) continue;
-      if (type === 'sources') {
-        const srcs = JSON.parse(data);
-        if (srcs.length) {
-          sourcesEl.innerHTML = '<div class="sources-title">Sources</div>' +
-            srcs.map(s => `<a class="source-chip" href="/transcript/${s.id}">[${s.n}] ${s.title}</a>`).join(' ');
-        }
-      } else if (type === 'done') {
-        // finished
-      } else {
-        answerEl.textContent += JSON.parse(data);
-      }
-    }
-  }
-});
-</script>
+{% set ask_scope_label = "all conversations" %}
+{% set ask_placeholder = "e.g. What did we decide about pricing?" %}
+{% include "_ask_panel.html" %}
 {% endblock %}

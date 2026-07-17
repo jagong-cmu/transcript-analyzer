@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}People · Briefing{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>People dossiers</h1>
+  <p class="muted">Synthesized profiles for people who show up repeatedly.
+    {% if not people %}Run synthesis after enough conversations land.{% endif %}
+  </p>
+</div>
+
+{% if people %}
+  <div class="person-grid">
+    {% for p in people %}
+      <a class="person-card" href="/people/{{ p.name | urlencode }}">
+        <div class="person-name">{{ p.name }}</div>
+        <div class="meta">{{ p.conversation_count }} conversation{{ 's' if p.conversation_count != 1 else '' }}</div>
+        {% if p.who %}<p class="summary">{{ p.who[:160] }}{% if p.who|length > 160 %}…{% endif %}</p>{% endif %}
+        {% if p.open_threads %}
+          <p class="thread-preview"><strong>Open:</strong> {{ p.open_threads[0].text }}</p>
+        {% endif %}
+      </a>
+    {% endfor %}
+  </div>
+{% else %}
+  <div class="empty-state panel">
+    <p>No dossiers yet. Synthesis writes them once someone appears in enough conversations
+      (see <code>dossier_min_conversations</code> in config).</p>
+  </div>
+{% endif %}
+{% endblock %}

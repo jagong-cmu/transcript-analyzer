@@ -2,19 +2,94 @@
 {% block title %}{{ category }} · Transcript Analyzer{% endblock %}
 {% block content %}
 <div class="page-head">
+  <p class="eyebrow"><a href="/browse">Browse</a></p>
   <h1>{{ category }}</h1>
-  <p class="muted">{{ items | length }} conversation(s)</p>
+  <p class="muted">
+    {{ items | length }} conversation{{ 's' if items | length != 1 else '' }} in this category.
+    {% if obsidian_url %}· <a href="{{ obsidian_url }}">Open in Obsidian ↗</a>{% endif %}
+  </p>
 </div>
-<ul class="list">
-  {% for r in items %}
-    <li>
-      <a href="/transcript/{{ r.transcript_id }}">{{ r.title }}</a>
-      <span class="meta">{{ r.date }} · {{ r.source }}</span>
-      {% if r.summary %}<p class="summary">{{ r.summary }}</p>{% endif %}
-      {% if r.topics %}<div class="tags">{% for t in r.topics %}<span class="tag">#{{ t }}</span>{% endfor %}</div>{% endif %}
-    </li>
-  {% else %}
-    <li class="muted">Empty category.</li>
-  {% endfor %}
-</ul>
+
+{% if insight.exists and (insight.overview or insight.themes or insight.open_threads) %}
+<section class="panel digest-panel">
+  <div class="panel-head">
+    <h2>Category briefing</h2>
+  </div>
+  {% if insight.overview %}
+    <p class="digest-headline" style="font-size:1.15rem">{{ insight.overview }}</p>
+  {% endif %}
+  {% if insight.themes %}
+    <div class="digest-section">
+      <h3>Themes</h3>
+      <ul class="claim-list">
+        {% for c in insight.themes %}
+          <li>
+            <span class="claim-text">{{ c.text }}</span>
+            {% if c.transcript_id %}<a class="cite" href="/transcript/{{ c.transcript_id }}">{{ c.title }}</a>{% endif %}
+          </li>
+        {% endfor %}
+      </ul>
+    </div>
+  {% endif %}
+  {% if insight.open_threads %}
+    <div class="digest-section">
+      <h3>Open threads</h3>
+      <ul class="claim-list">
+        {% for c in insight.open_threads %}
+          <li>
+            <span class="claim-text">{{ c.text }}</span>
+            {% if c.transcript_id %}<a class="cite" href="/transcript/{{ c.transcript_id }}">{{ c.title }}</a>{% endif %}
+          </li>
+        {% endfor %}
+      </ul>
+    </div>
+  {% endif %}
+  {% if insight.open_commitments %}
+    <div class="digest-section">
+      <h3>Open commitments</h3>
+      <ul class="checklist">
+        {% for c in insight.open_commitments %}
+          <li><span class="box">☐</span> {{ c.text }}
+            {% if c.transcript_id %}<a class="cite" href="/transcript/{{ c.transcript_id }}">{{ c.title }}</a>{% endif %}
+          </li>
+        {% endfor %}
+      </ul>
+    </div>
+  {% endif %}
+</section>
+{% elif items %}
+<section class="panel">
+  <p class="muted">No scoped briefing yet. Re-run <strong>Categorize</strong> on Browse to synthesize themes and open threads for this folder.</p>
+</section>
+{% endif %}
+
+{% set ask_scope_label = category %}
+{% set ask_category = category %}
+{% set ask_placeholder = "e.g. What themes keep coming up here?" %}
+{% include "_ask_panel.html" %}
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Conversations</h2>
+  </div>
+  <ul class="list">
+    {% for r in items %}
+      <li>
+        <a href="/transcript/{{ r.transcript_id }}">{{ r.title }}</a>
+        <span class="meta">{{ r.date }} · {{ r.source }}</span>
+        {% if r.summary %}<p class="summary">{{ r.summary }}</p>{% endif %}
+        {% if r.action_items %}
+          <ul class="checklist compact">
+            {% for a in r.action_items[:3] %}
+              <li><span class="box">☐</span> {{ a }}</li>
+            {% endfor %}
+          </ul>
+        {% endif %}
+        {% if r.topics %}<div class="tags">{% for t in r.topics %}<span class="tag">#{{ t }}</span>{% endfor %}</div>{% endif %}
+      </li>
+    {% else %}
+      <li class="muted">Empty category. Run Categorize on Browse to populate it.</li>
+    {% endfor %}
+  </ul>
+</section>
 {% endblock %}

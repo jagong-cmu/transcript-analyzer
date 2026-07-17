@@ -3,31 +3,44 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}Transcript Analyzer{% endblock %}</title>
+  <title>{% block title %}Briefing · Transcript Analyzer{% endblock %}</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 <header class="topbar">
-  <a href="/" class="brand">◆ Transcript Analyzer</a>
+  <a href="/" class="brand">◆ Briefing</a>
   <nav>
-    <a href="/">Dashboard</a>
-    <a href="/chat">Ask</a>
+    <a href="/" class="{% if request.url.path == '/' %}active{% endif %}">Today</a>
+    <a href="/commitments" class="{% if request.url.path.startswith('/commitments') %}active{% endif %}">Commitments</a>
+    <a href="/people" class="{% if request.url.path.startswith('/people') %}active{% endif %}">People</a>
+    <a href="/prep" class="{% if request.url.path.startswith('/prep') %}active{% endif %}">Prep</a>
+    <a href="/chat" class="{% if request.url.path.startswith('/chat') %}active{% endif %}">Ask</a>
+    <a href="/browse" class="{% if request.url.path.startswith('/browse') or request.url.path.startswith('/category') or request.url.path.startswith('/transcript') %}active{% endif %}">Browse</a>
   </nav>
 </header>
 <div class="layout">
   <aside class="sidebar">
-    <div class="sidebar-title">Categories</div>
+    <div class="sidebar-title">Jump to</div>
+    <ul class="cat-list">
+      <li><a href="/">Today’s digest</a></li>
+      <li><a href="/commitments">Open commitments</a></li>
+      <li><a href="/people">People dossiers</a></li>
+      <li><a href="/studies">Studies</a></li>
+      <li><a href="/prep">Meeting prep</a></li>
+    </ul>
+    {% if categories %}
+    <div class="sidebar-title" style="margin-top:22px">Categories</div>
     <ul class="cat-list">
       {% for name, count in categories %}
         <li><a href="/category/{{ name | urlencode }}">{{ name }} <span class="badge">{{ count }}</span></a></li>
-      {% else %}
-        <li class="muted hint">None yet. Run<br><code>scripts/categorize.py</code><br>to create categories.</li>
       {% endfor %}
     </ul>
+    {% endif %}
   </aside>
-  <main class="content">
+  <main class="content {% block content_class %}{% endblock %}">
     {% block content %}{% endblock %}
   </main>
 </div>
+{% block scripts %}{% endblock %}
 </body>
 </html>
