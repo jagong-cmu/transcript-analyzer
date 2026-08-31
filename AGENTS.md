@@ -15,12 +15,13 @@ against a scratch vault instead of the real one.
 ## Sharp edges
 
 - **The vault notes are the source of truth; the SQLite index is derived.** `obsidian/writer.py`
-  emits frontmatter by hand-formatting strings, and `pipeline/indexer.py:parse_note` returns
-  `None` on any load error — so frontmatter that is not valid YAML makes a note *silently
-  disappear* from the index and the dashboard, with no error logged. Route every hand-written
-  frontmatter scalar through `writer._yaml_str`.
-- `reindex_all` calls `parse_note` in a bare loop with no per-note try/except: anything that
-  raises there takes down the whole index, not one note. Fail soft inside `parse_note`.
+  emits frontmatter by hand-formatting strings, so every hand-written scalar must go through
+  `writer._yaml_str` — it is the only thing escaping the backslashes, quotes, newlines and
+  control characters that arrive in LLM headlines and transcript text. Frontmatter that is not
+  valid YAML makes a note vanish from the index and the dashboard until it is fixed;
+  `pipeline/indexer.py:parse_note` fails soft on such a note (logs a warning, skips that note
+  alone) so one bad note no longer aborts `reindex_all`, but the note is still missing. Watch
+  for the warning rather than assuming a note is indexed.
 - Scripts under `scripts/` write to the *live* vault and call the Pocket/Granola/Anthropic
   APIs. Use `--dry-run`/`--limit` when exercising them.
 

@@ -34,6 +34,16 @@ def _parse_date(val) -> date:
         return date.today()
 
 
+def _seg_timing(seg: dict, primary: str, fallback: str):
+    """Read a segment timing field by presence, not truthiness.
+
+    A numeric 0 is a real t=0 — reading it as absent dropped the [0:00] prefix
+    from the opening line of every numerically-timed note.
+    """
+    value = seg.get(primary)
+    return value if value is not None else seg.get(fallback)
+
+
 class GranolaClient:
     def __init__(self, cfg: Config) -> None:
         if not cfg.granola.enabled:
@@ -181,8 +191,8 @@ class GranolaClient:
         # still marks t=0 for the ISO → relative conversion below.
         raw = [seg for seg in (detail.get("transcript") or []) if isinstance(seg, dict)]
         owner, other = cls._channel_labels(detail)
-        starts = [seg.get("start_time") or seg.get("start") for seg in raw]
-        ends = [seg.get("end_time") or seg.get("end") for seg in raw]
+        starts = [_seg_timing(seg, "start_time", "start") for seg in raw]
+        ends = [_seg_timing(seg, "end_time", "end") for seg in raw]
         # Prefer ISO wall-clock → relative; else numeric start fields, whose
         # unit is resolved once across the note rather than per value.
         rel = relative_seconds_from_iso(

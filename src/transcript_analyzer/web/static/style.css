@@ -215,6 +215,7 @@ h3 { font-size: 14px; margin: 16px 0 8px; color: var(--muted); text-transform: u
   padding: 4px 6px; border-radius: 6px;
 }
 .t-line.t-blank { min-height: 0.6em; }
+.t-line.t-untimed .t-text { grid-column: 1 / -1; }
 .t-line.active { background: var(--accent-soft); }
 .t-ts {
   font-variant-numeric: tabular-nums; font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;

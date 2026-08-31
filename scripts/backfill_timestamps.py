@@ -29,20 +29,37 @@ from transcript_analyzer.obsidian.writer import _quote_block  # noqa: E402
 from transcript_analyzer.pipeline.indexer import index_note  # noqa: E402
 
 
+_HEADING_RE = re.compile(r"## Transcript\s*")
+
+
 def _replace_transcript_section(content: str, timed_text: str) -> str:
-    block = "## Transcript\n" + _quote_block(timed_text) + "\n"
-    if re.search(r"^## Transcript\s*$", content, re.MULTILINE):
-        # Transcript text is arbitrary content, so it must never be used as a
-        # re.sub template — a stray backslash raises "bad escape" (or worse,
-        # silently expands a group reference). A function replacement is literal.
-        return re.sub(
-            r"^## Transcript\s*\n.*",
-            lambda _m: block.rstrip() + "\n",
-            content,
-            count=1,
-            flags=re.MULTILINE | re.DOTALL,
-        )
-    return content.rstrip() + "\n\n" + block
+    """Rewrite only the '## Transcript' callout, leaving the rest of the note.
+
+    The vault is the source of truth and hand-edits are respected, so anything
+    the owner appended below the callout must survive this migration. The
+    callout ends at the first line that is neither blank nor a '>' line — the
+    same stop rule indexer._extract_transcript uses.
+    """
+    block = "## Transcript\n" + _quote_block(timed_text)
+    lines = content.splitlines()
+    start = next(
+        (i for i, ln in enumerate(lines) if _HEADING_RE.fullmatch(ln)), None
+    )
+    if start is None:
+        return content.rstrip() + "\n\n" + block + "\n"
+
+    end = start  # index of the last line belonging to the callout
+    for i in range(start + 1, len(lines)):
+        ln = lines[i]
+        if ln.startswith(">"):
+            end = i
+        elif ln.strip():
+            break
+    # Transcript text is arbitrary content, so it must never be used as a
+    # re.sub template — a stray backslash raises "bad escape" (or worse,
+    # silently expands a group reference). Splicing the lines is literal.
+    rebuilt = lines[:start] + block.splitlines() + lines[end + 1:]
+    return "\n".join(rebuilt).rstrip("\n") + "\n"
 
 
 def _already_timed(text: str) -> bool:

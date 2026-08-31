@@ -52,12 +52,37 @@ def _wikilink(name: str) -> str:
     return f"[[{name}]]"
 
 
+_YAML_SHORT_ESCAPES = {
+    "\\": "\\\\",
+    '"': '\\"',
+    "\n": "\\n",
+    "\r": "\\r",
+    "\t": "\\t",
+}
+
+
 def _yaml_str(value: str) -> str:
-    """A YAML double-quoted scalar. Backslashes must be escaped first: inside
-    double quotes YAML reads ``\\`` as an escape, so an un-escaped one from an
-    LLM headline or transcript makes the whole note unparseable — and the
-    indexer silently drops notes whose frontmatter won't load."""
-    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
+    """A YAML double-quoted scalar that round-trips arbitrary text exactly.
+
+    Inside double quotes YAML reads ``\\`` as an escape, folds real line breaks
+    into spaces, and rejects most control characters outright — so an un-escaped
+    one from an LLM headline, an action item or a transcript either corrupts the
+    value or makes the whole note unparseable, and the indexer drops notes whose
+    frontmatter won't load. Every such character is emitted as an escape.
+    """
+    out: list[str] = []
+    for ch in str(value):
+        short = _YAML_SHORT_ESCAPES.get(ch)
+        if short is not None:
+            out.append(short)
+            continue
+        cp = ord(ch)
+        # C0/C1 controls plus the YAML 1.1 line separators, which fold like \n.
+        if cp < 0x20 or 0x7F <= cp <= 0x9F or ch in ("\u2028", "\u2029"):
+            out.append(f"\\x{cp:02x}" if cp < 0x100 else f"\\u{cp:04x}")
+        else:
+            out.append(ch)
+    return '"' + "".join(out) + '"'
 
 
 def _quote_block(text: str) -> str:

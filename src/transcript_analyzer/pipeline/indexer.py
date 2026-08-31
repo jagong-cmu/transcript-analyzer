@@ -14,6 +14,7 @@ the system from summarizing its own summaries in an unattended 20-minute loop:
 """
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 from typing import Optional
@@ -24,6 +25,8 @@ from ..config import Config
 from ..db import get_conn, upsert_transcript
 from ..models import Attendee, NoteRecord
 from ..titles import clean_headline, compose_display_title, headline_from_summary
+
+_log = logging.getLogger(__name__)
 
 _WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 _CHECKBOX_RE = re.compile(r"^\s*-\s*\[( |x|X)\]\s*(.+?)\s*$")
@@ -110,10 +113,23 @@ def _parse_attendees(meta: dict) -> list[Attendee]:
 
 
 def parse_note(path: Path) -> Optional[NoteRecord]:
+    """Parse one vault note into a record, or None if it is not indexable.
+
+    Fails soft, and loudly: reindex_all walks every note in a bare loop, so one
+    hand-edited note — unloadable frontmatter, or a field whose shape surprises
+    us (`people: 42`) — must cost that note alone, not the whole vault index.
+    The note still disappears from the index until it is fixed, so the reason is
+    logged rather than swallowed.
+    """
     try:
-        post = frontmatter.load(str(path))
+        return _parse_note(path)
     except Exception:  # noqa: BLE001
+        _log.warning("skipping unparseable note: %s", path, exc_info=True)
         return None
+
+
+def _parse_note(path: Path) -> Optional[NoteRecord]:
+    post = frontmatter.load(str(path))
     meta = post.metadata
     tid = meta.get("transcript_id")
     if not tid or meta.get("synth"):

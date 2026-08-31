@@ -162,3 +162,68 @@ def test_writer_frontmatter_survives_backslashes_and_quotes(cfg):
     assert rec.title == f"{nasty}, July 1st, 2026"
     assert rec.topics == [nasty]
     assert rec.attendees[0].name == nasty
+
+
+def test_writer_frontmatter_survives_newlines_and_control_chars(cfg):
+    """An interior newline or control character in a hand-quoted scalar made the
+    frontmatter unloadable (a '---' continuation line, or a C0 char PyYAML
+    rejects outright), so the note vanished from the index — and values that did
+    parse were silently folded onto one line."""
+    from datetime import date as _date
+
+    import frontmatter as _frontmatter
+
+    from transcript_analyzer.models import Insight, Transcript
+    from transcript_analyzer.obsidian import writer
+
+    nasty = "Do X\n--- separator\twith \x0b \x0c \x00 and \x85"
+    transcript = Transcript(
+        id="t10",
+        source="granola",
+        native_id="n10",
+        title="raw",
+        date=_date(2026, 7, 1),
+        text="Ops: doing X.",
+    )
+    insight = Insight(
+        headline="Multi-line action items",
+        summary="Doing X.",
+        topics=[nasty],
+        action_items=[nasty],
+        people=["Ops"],
+    )
+    p = write(
+        cfg.vault.insights_path / "2026-07-01 multiline.md",
+        writer.render_note(transcript, insight),
+    )
+
+    rec = indexer.parse_note(p)
+    assert rec is not None, "note was dropped from the index"
+    # The frontmatter scalar round-trips exactly rather than folding.
+    assert rec.topics == [nasty]
+    assert _frontmatter.load(str(p)).metadata["action_items"] == [nasty]
+
+
+def test_malformed_note_does_not_abort_the_whole_reindex(cfg):
+    """A hand-edited note with a surprising field shape costs that note alone.
+
+    `people: 42` makes parse_note iterate a non-iterable; reindex_all walks
+    notes in a bare loop, so it used to take the entire vault index down.
+    """
+    write(
+        cfg.vault.insights_path / "2026-06-01 broken.md",
+        NOTE.replace('people:\n  - "[[Angela Jin]]"', "people: 42").replace(
+            "abc123", "def456"
+        ),
+    )
+    write(cfg.vault.insights_path / "2026-07-01 chat.md", NOTE)
+
+    # The broken note sorts first, so the good one only indexes if the loop
+    # survived it.
+    assert indexer.reindex_all(cfg) == 1
+
+    from transcript_analyzer.db import all_transcripts, get_conn
+
+    with get_conn(cfg.db_path) as conn:
+        recs = all_transcripts(conn)
+    assert [r.transcript_id for r in recs] == ["abc123"]

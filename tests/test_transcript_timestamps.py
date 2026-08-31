@@ -142,3 +142,34 @@ def test_granola_leading_silent_segment_still_anchors_zero():
     segs = GranolaClient._transcript_segments(detail)
     assert [s.text for s in segs] == ["Hi"]
     assert segs[0].start_sec == 10.0
+
+
+def test_granola_numeric_zero_start_keeps_the_opening_timestamp():
+    """`start_time: 0` is a real t=0. Reading the field by truthiness fell
+    through to the missing `start` key, so the first line lost its [0:00]."""
+    detail = {
+        "id": "n2",
+        "title": "Call",
+        "created_at": "2026-07-01T12:00:00Z",
+        "owner": {"name": "Jonathan"},
+        "attendees": [{"name": "Angela", "email": "a@x.com"}],
+        "transcript": [
+            {
+                "text": "Hi",
+                "speaker": {"name": "Jonathan", "source": "microphone"},
+                "start_time": 0,
+                "end_time": 2,
+            },
+            {
+                "text": "Hello",
+                "speaker": {"name": "Angela", "source": "speaker"},
+                "start_time": 5,
+                "end_time": 7,
+            },
+        ],
+    }
+    text, segs = GranolaClient._transcript_text(detail)
+    assert segs[0].start_sec == 0.0
+    assert segs[0].end_sec == 2.0
+    assert text.splitlines()[0] == "[0:00] Jonathan: Hi"
+    assert "[0:05] Angela: Hello" in text

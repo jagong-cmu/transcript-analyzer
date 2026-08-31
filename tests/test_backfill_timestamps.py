@@ -48,3 +48,31 @@ def test_already_timed_detection():
     assert backfill_timestamps._already_timed("plain\n[12:05] later")
     assert not backfill_timestamps._already_timed("plain text only")
     assert not backfill_timestamps._already_timed("")
+
+
+NOTE_WITH_TRAILING_CONTENT = """# A note
+
+## Summary
+Something happened.
+
+## Transcript
+> [!note]- Full transcript
+> old untimed text
+
+## My follow-up
+Notes I added by hand in Obsidian after the fact.
+"""
+
+
+def test_content_after_the_transcript_callout_survives():
+    """The vault is the source of truth: matching to end-of-file discarded
+    everything the owner had appended below the transcript."""
+    out = backfill_timestamps._replace_transcript_section(
+        NOTE_WITH_TRAILING_CONTENT, "[0:00] Hi"
+    )
+    assert "> [0:00] Hi" in out
+    assert "old untimed text" not in out
+    assert "## My follow-up" in out
+    assert "Notes I added by hand in Obsidian after the fact." in out
+    # And the appended section stays below the rewritten callout.
+    assert out.index("> [0:00] Hi") < out.index("## My follow-up")

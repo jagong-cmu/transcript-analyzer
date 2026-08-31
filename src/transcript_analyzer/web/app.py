@@ -126,7 +126,16 @@ async def categorize_now(request: Request):
     defs: list = []
     content_type = (request.headers.get("content-type") or "").lower()
     if "application/json" in content_type:
-        body = await request.json()
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            return JSONResponse(
+                {"ok": False, "error": "Invalid JSON body."}, status_code=400
+            )
+        if not isinstance(body, dict):
+            return JSONResponse(
+                {"ok": False, "error": "JSON body must be an object."}, status_code=400
+            )
         defs = organize.normalize_categories(body.get("categories") or [])
     else:
         form = await request.form()

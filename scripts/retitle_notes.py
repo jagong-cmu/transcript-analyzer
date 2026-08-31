@@ -203,8 +203,6 @@ def retitle(
 
         if existing and not force and not only_weak:
             headline = existing
-        elif existing and only_weak and not _needs_llm_polish(existing) and not force:
-            headline = existing
         elif cheap or llm is None:
             headline = headline_from_summary(summary, fallback=old_title)
         else:
