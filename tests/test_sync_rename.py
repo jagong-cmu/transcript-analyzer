@@ -7,6 +7,7 @@ and the whole recording was fetched again.
 """
 from dataclasses import replace
 from datetime import date, datetime, timezone
+from pathlib import Path
 
 from transcript_analyzer import sync
 from transcript_analyzer.db import get_conn, record_sync
@@ -121,3 +122,84 @@ def test_move_audio_with_note_replaces_a_stale_file_at_the_target(cfg):
     # Nothing to move: same note, or no recording on disk.
     assert writer.move_audio_with_note(cfg, new_note, new_note) is None
     assert writer.move_audio_with_note(cfg, old_note, new_note) is None
+
+
+def _granola_transcript() -> Transcript:
+    return Transcript(
+        id="g1",
+        source="granola",
+        native_id="gn1",
+        title="Raw source title",
+        date=date(2026, 7, 1),
+        text="Angela: we should ship the pricing deck.",
+    )
+
+
+def _symlinked_vault_cfg(cfg, tmp_path):
+    """A vault reached through a symlink: str(p) != str(p.resolve())."""
+    real = tmp_path / "real_vault"
+    (real / cfg.vault.insights_folder).mkdir(parents=True)
+    link = tmp_path / "linked_vault"
+    link.symlink_to(real, target_is_directory=True)
+    return replace(cfg, vault=replace(cfg.vault, path=link))
+
+
+def test_resync_keeps_the_note_when_sync_state_holds_the_resolved_path(
+    cfg, tmp_path, monkeypatch
+):
+    """The migration scripts store the RESOLVED note path; sync stored the raw
+    one and compared the two strings, so on a symlinked (or relative) vault the
+    cleanup deleted the note it had just written — and the index went empty."""
+    cfg = _symlinked_vault_cfg(cfg, tmp_path)
+    transcript = _granola_transcript()
+    insight = Insight(headline="Pricing deck review with Angela", summary="S.")
+
+    note = writer.write_note(cfg, transcript, insight)
+    assert str(note) != str(note.resolve()), "vault path is not symlinked in this test"
+    with get_conn(cfg.db_path) as conn:
+        record_sync(
+            conn,
+            transcript.source,
+            transcript.native_id,
+            "oldhash",
+            str(note.resolve()),
+            datetime.now(timezone.utc).isoformat(),
+        )
+
+    monkeypatch.setattr(sync, "extract_insight", lambda *a, **k: insight)
+    result = sync.process_transcript(cfg, transcript, llm=None)
+
+    assert Path(result["note_path"]).exists(), "the note it just wrote was deleted"
+    from transcript_analyzer.db import all_transcripts, get_sync_note_path
+
+    with get_conn(cfg.db_path) as conn:
+        recs = all_transcripts(conn)
+        stored = get_sync_note_path(conn, transcript.source, transcript.native_id)
+    assert [r.transcript_id for r in recs] == [transcript.id]
+    # One spelling in the DB, the same one the migration scripts write.
+    assert stored == str(note.resolve())
+
+
+def test_resync_still_removes_a_genuinely_renamed_note(cfg, tmp_path, monkeypatch):
+    """Failing safe on path spellings must not stop real stale-note cleanup."""
+    cfg = _symlinked_vault_cfg(cfg, tmp_path)
+    transcript = _granola_transcript()
+
+    old_note = writer.write_note(cfg, transcript, Insight(headline="Old headline"))
+    with get_conn(cfg.db_path) as conn:
+        record_sync(
+            conn,
+            transcript.source,
+            transcript.native_id,
+            "oldhash",
+            str(old_note.resolve()),
+            datetime.now(timezone.utc).isoformat(),
+        )
+
+    new_insight = Insight(headline="Pricing deck review with Angela", summary="S.")
+    monkeypatch.setattr(sync, "extract_insight", lambda *a, **k: new_insight)
+    result = sync.process_transcript(cfg, transcript, llm=None)
+
+    assert Path(result["note_path"]).exists()
+    assert Path(result["note_path"]).name != old_note.name
+    assert not old_note.exists()

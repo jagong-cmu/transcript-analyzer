@@ -27,7 +27,7 @@ import frontmatter  # noqa: E402
 from slugify import slugify  # noqa: E402
 
 from transcript_analyzer.config import load_config  # noqa: E402
-from transcript_analyzer.db import get_conn  # noqa: E402
+from transcript_analyzer.db import canonical_note_path, get_conn  # noqa: E402
 from transcript_analyzer.obsidian import writer  # noqa: E402
 from transcript_analyzer.pipeline.indexer import reindex_all  # noqa: E402
 from transcript_analyzer.pipeline.llm import LLM  # noqa: E402
@@ -126,7 +126,7 @@ def _rename_with_audio(cfg, old: Path, new: Path, *, dry_run: bool) -> Path:
     with get_conn(cfg.db_path) as conn:
         conn.execute(
             "UPDATE sync_state SET note_path = ? WHERE note_path = ?",
-            (str(new.resolve()), str(old.resolve())),
+            (canonical_note_path(new), canonical_note_path(old)),
         )
     return new
 

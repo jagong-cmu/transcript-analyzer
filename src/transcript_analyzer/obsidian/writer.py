@@ -68,7 +68,7 @@ def _safe_filename(headline: str, when: str) -> str:
 
 
 def _wikilink(name: str) -> str:
-    name = name.strip().replace("[", "").replace("]", "")
+    name = _one_line(name).replace("[", "").replace("]", "")
     return f"[[{name}]]"
 
 
@@ -121,6 +121,24 @@ def _one_line(value: str) -> str:
         for ch in str(value)
     )
     return " ".join(text.split())
+
+
+def _body_text(value: str) -> str:
+    """Free text safe to place in the note body, keeping its line structure.
+
+    The indexer finds every section by matching whole body lines ('## Summary',
+    '## Transcript'), so an LLM value whose own line is heading-shaped opens a
+    section the writer never opened: the real transcript stops being what the
+    index, the dashboard and RAG read back. Escaping the leading '#' run leaves
+    an ordinary value byte-identical and renders as a literal '#' in Obsidian.
+    """
+    out: list[str] = []
+    for ln in str(value).splitlines() or [""]:
+        stripped = ln.lstrip()
+        if stripped.startswith("#"):
+            ln = ln[: len(ln) - len(stripped)] + "\\" + stripped
+        out.append(ln)
+    return "\n".join(out)
 
 
 def _quote_block(text: str) -> str:
@@ -207,7 +225,7 @@ def render_note(transcript: Transcript, insight: Insight, audio_name: str | None
         body.append(f"![[{audio_name}]]")
         body.append("")
     body.append("## Summary")
-    body.append(insight.summary or "_No summary._")
+    body.append(_body_text(insight.summary) or "_No summary._")
     body.append("")
     body.append("## Key Points")
     body.extend([f"- {kp}" for kp in key_points] or ["- _None._"])

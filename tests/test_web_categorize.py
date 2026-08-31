@@ -5,15 +5,24 @@ per note, so running it on the event loop froze every other request — includin
 the page's own status poll — for the whole run.
 """
 import asyncio
+import importlib
 import json
+import sys
 
 import pytest
 from fastapi.testclient import TestClient
 
+APP_MODULE = "transcript_analyzer.web.app"
+
 
 @pytest.fixture
 def app_mod(tmp_path, monkeypatch):
-    """Import the dashboard against a scratch config (never the real vault)."""
+    """Import the dashboard against a scratch config (never the real vault).
+
+    web/app.py binds `cfg = load_config()` at module scope, so the module has
+    to be dropped from sys.modules and re-imported for each test to actually
+    get its own config instead of the first test's (deleted) tmp_path.
+    """
     config = tmp_path / "config.toml"
     config.write_text(
         "[vault]\n"
@@ -31,9 +40,12 @@ def app_mod(tmp_path, monkeypatch):
     from transcript_analyzer.config import load_config
 
     load_config.cache_clear()
-    from transcript_analyzer.web import app as app_module
+    sys.modules.pop(APP_MODULE, None)
+    app_module = importlib.import_module(APP_MODULE)
 
     yield app_module
+
+    sys.modules.pop(APP_MODULE, None)
     load_config.cache_clear()
 
 
@@ -115,3 +127,10 @@ def test_categorize_accepts_the_form_body(app_mod, monkeypatch):
 
     assert r.status_code == 200
     assert seen["categories"] == ["Hiring", "Fundraising"]
+
+
+def test_fixture_binds_this_tests_config(app_mod, tmp_path):
+    """Not the first test in this module: the module-scoped `cfg` has to be
+    re-bound per test, or later tests silently run against a deleted tmp vault."""
+    assert app_mod.cfg.vault.path == tmp_path / "vault"
+    assert app_mod.cfg.vault.insights_path.parent == tmp_path / "vault"

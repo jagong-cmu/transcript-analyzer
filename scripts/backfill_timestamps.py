@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import frontmatter  # noqa: E402
 
 from transcript_analyzer.config import load_config  # noqa: E402
-from transcript_analyzer.db import get_conn, record_sync  # noqa: E402
+from transcript_analyzer.db import canonical_note_path, get_conn, record_sync  # noqa: E402
 from transcript_analyzer.obsidian.writer import _quote_block  # noqa: E402
 from transcript_analyzer.pipeline.indexer import index_note  # noqa: E402
 
@@ -40,16 +40,30 @@ def _is_transcript_heading(line: str) -> bool:
     return line.strip().lower() == "## transcript"
 
 
+def _section_end(lines: list[str], start: int) -> int:
+    """Index of the last line of the transcript section that starts at `start`.
+
+    The section is exactly one grammar: the heading, an optional run of blank
+    lines, then the contiguous run of '>' lines that is the callout. It ends
+    there — a blank line, a callout the owner appended, or any later section
+    belongs to them, not to this script. When no callout follows the heading,
+    the section is the heading alone, so nothing of theirs is spliced away.
+    """
+    i = start + 1
+    while i < len(lines) and not lines[i].strip():
+        i += 1
+    if i >= len(lines) or not lines[i].startswith(">"):
+        return start
+    while i + 1 < len(lines) and lines[i + 1].startswith(">"):
+        i += 1
+    return i
+
+
 def _replace_transcript_section(content: str, timed_text: str) -> str:
     """Rewrite only the '## Transcript' callout, leaving the rest of the note.
 
     The vault is the source of truth and hand-edits are respected, so anything
-    the owner appended below the callout must survive this migration. The
-    callout ends at the first line that is not a '>' line, blank lines included:
-    _quote_block prefixes every transcript line with '> ', so an interior blank
-    line is emitted as '> ' and a truly blank line is always the end of what
-    this script wrote. Scanning past it would swallow a separate blockquote the
-    owner appended below.
+    the owner appended below the callout must survive this migration.
     """
     block = "## Transcript\n" + _quote_block(timed_text)
     lines = content.splitlines()
@@ -59,11 +73,7 @@ def _replace_transcript_section(content: str, timed_text: str) -> str:
     if start is None:
         return content.rstrip() + "\n\n" + block + "\n"
 
-    end = start  # index of the last line belonging to the callout
-    for i in range(start + 1, len(lines)):
-        if not lines[i].startswith(">"):
-            break
-        end = i
+    end = _section_end(lines, start)
     # Transcript text is arbitrary content, so it must never be used as a
     # re.sub template — a stray backslash raises "bad escape" (or worse,
     # silently expands a group reference). Splicing the lines is literal.
@@ -108,7 +118,7 @@ def backfill(*, source: str | None, limit: int | None, dry_run: bool, force: boo
         with get_conn(cfg.db_path) as conn:
             srow = conn.execute(
                 "SELECT native_id, source FROM sync_state WHERE note_path = ?",
-                (str(note_path.resolve()),),
+                (canonical_note_path(note_path),),
             ).fetchone()
             if not srow:
                 # try by matching any sync row that points near this file
@@ -185,7 +195,7 @@ def backfill(*, source: str | None, limit: int | None, dry_run: bool, force: boo
                 src,
                 native,
                 t.hash,
-                str(note_path.resolve()),
+                canonical_note_path(note_path),
                 datetime.now(timezone.utc).isoformat(),
             )
         updated += 1

@@ -114,6 +114,18 @@ def get_sync_hash(conn: sqlite3.Connection, source: str, native_id: str) -> Opti
     return row["content_hash"] if row else None
 
 
+def canonical_note_path(path) -> str:
+    """The one spelling of a note path these tables store.
+
+    sync_state.note_path is written by the sync pipeline and by the one-shot
+    migration scripts, and read back to decide whether a note was renamed; a
+    second spelling of the same file (a relative or symlinked vault path) would
+    make them disagree. Resolved is that spelling — it is what the indexer
+    already stores in transcripts.note_path.
+    """
+    return str(Path(path).resolve()) if path else ""
+
+
 def get_sync_note_path(conn: sqlite3.Connection, source: str, native_id: str) -> Optional[str]:
     row = conn.execute(
         "SELECT note_path FROM sync_state WHERE source = ? AND native_id = ?",

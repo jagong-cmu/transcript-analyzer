@@ -276,3 +276,106 @@ def test_multiline_body_list_items_are_not_truncated(cfg):
         if ln.strip().lower() == "## transcript"
     ]
     assert len(headings) == 1
+
+
+def test_summary_cannot_open_a_section_the_writer_never_opened(cfg):
+    """A heading-shaped line inside the LLM summary hijacked the parse: the
+    indexer latched onto that '## Transcript' and stored the injected text, so
+    the real transcript vanished from the index, the dashboard and RAG."""
+    from datetime import date as _date
+
+    from transcript_analyzer.models import Insight, Transcript
+    from transcript_analyzer.obsidian import writer
+
+    transcript = Transcript(
+        id="t12",
+        source="granola",
+        native_id="n12",
+        title="raw",
+        date=_date(2026, 7, 1),
+        text="Angela: the real transcript line.",
+    )
+    insight = Insight(
+        headline="Pricing chat",
+        summary="We discussed pricing.\n## Transcript\n> injected line",
+        key_points=["Kept"],
+        action_items=["Follow up"],
+        people=["Angela Jin"],
+    )
+    p = write(
+        cfg.vault.insights_path / "2026-07-01 injected.md",
+        writer.render_note(transcript, insight),
+    )
+
+    rec = indexer.parse_note(p)
+    assert rec is not None
+    assert rec.transcript_text == "Angela: the real transcript line."
+    # Nothing is dropped: both lines of the summary survive the round trip.
+    assert "We discussed pricing." in rec.summary
+    assert "injected line" in rec.summary
+    assert rec.action_items == ["Follow up"]
+    headings = [
+        ln
+        for ln in p.read_text(encoding="utf-8").splitlines()
+        if ln.strip().lower() == "## transcript"
+    ]
+    assert len(headings) == 1
+
+
+def test_ordinary_multiline_summary_is_unchanged(cfg):
+    """The escape must be invisible to a normal summary."""
+    from datetime import date as _date
+
+    from transcript_analyzer.models import Insight, Transcript
+    from transcript_analyzer.obsidian import writer
+
+    summary = "First paragraph.\n\nSecond paragraph with a #tag and a - dash."
+    transcript = Transcript(
+        id="t13",
+        source="granola",
+        native_id="n13",
+        title="raw",
+        date=_date(2026, 7, 1),
+        text="Angela: hello.",
+    )
+    insight = Insight(headline="Plain", summary=summary)
+    p = write(
+        cfg.vault.insights_path / "2026-07-01 plain.md",
+        writer.render_note(transcript, insight),
+    )
+
+    rec = indexer.parse_note(p)
+    assert rec is not None
+    assert rec.summary == summary
+    assert rec.transcript_text == "Angela: hello."
+
+
+def test_person_name_cannot_break_the_body_or_the_wikilink(cfg):
+    """People are rendered as '[[name]]' links, which cannot span lines."""
+    from datetime import date as _date
+
+    from transcript_analyzer.models import Insight, Transcript
+    from transcript_analyzer.obsidian import writer
+
+    transcript = Transcript(
+        id="t14",
+        source="granola",
+        native_id="n14",
+        title="raw",
+        date=_date(2026, 7, 1),
+        text="Angela: hello.",
+    )
+    insight = Insight(
+        headline="Broken name",
+        summary="Hi.",
+        people=["Angela Jin\n## Transcript\n> injected line"],
+    )
+    p = write(
+        cfg.vault.insights_path / "2026-07-01 person.md",
+        writer.render_note(transcript, insight),
+    )
+
+    rec = indexer.parse_note(p)
+    assert rec is not None
+    assert rec.people == ["Angela Jin ## Transcript > injected line"]
+    assert rec.transcript_text == "Angela: hello."

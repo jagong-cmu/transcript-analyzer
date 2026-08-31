@@ -18,6 +18,7 @@ from typing import Iterable, Optional
 from .config import Config, load_config
 from .connectors import pocket
 from .db import (
+    canonical_note_path,
     get_conn,
     get_meta,
     get_sync_hash,
@@ -90,6 +91,22 @@ def _maybe_download_audio(cfg: Config, transcript: Transcript, note_path: Path) 
     return dest.name if got else None
 
 
+def _is_stale_note(prev_path: str, note_path: Path) -> bool:
+    """Whether `prev_path` is provably a DIFFERENT file from the note just written.
+
+    The vault has no backup, so this fails safe: a path that cannot be shown to
+    be another file — a relative or symlinked vault path spelling the same note
+    two ways, or a path that cannot be stat'ed — is never deleted.
+    """
+    prev = Path(prev_path)
+    try:
+        if not prev.exists() or prev.samefile(note_path):
+            return False
+    except OSError:
+        return False
+    return True
+
+
 def _count_failure(cfg: Config) -> int:
     """Visible failure counter (surfaced in the sync summary and /health-adjacent
     tooling) so silent extraction failures can't hide."""
@@ -127,7 +144,7 @@ def process_transcript(
     # A re-worded headline renames the note; carry its recording across first,
     # so the download below finds the file the vault already has.
     prospective = writer.note_path_for(cfg, transcript, insight)
-    if prev_path and prev_path != str(prospective):
+    if prev_path and canonical_note_path(prev_path) != canonical_note_path(prospective):
         writer.move_audio_with_note(cfg, Path(prev_path), prospective)
 
     # Download the recording's audio into the vault (Pocket only) and embed it.
@@ -136,7 +153,7 @@ def process_transcript(
     note_path = writer.write_note(cfg, transcript, insight, audio_name=audio_name)
     result["note_path"] = str(note_path)
 
-    if prev_path and prev_path != str(note_path) and os.path.exists(prev_path):
+    if prev_path and _is_stale_note(prev_path, note_path):
         try:
             os.remove(prev_path)
         except OSError:
@@ -147,7 +164,7 @@ def process_transcript(
     with get_conn(cfg.db_path) as conn:
         record_sync(
             conn, transcript.source, transcript.native_id,
-            transcript.hash, str(note_path), _now(),
+            transcript.hash, canonical_note_path(note_path), _now(),
         )
     return result
 
