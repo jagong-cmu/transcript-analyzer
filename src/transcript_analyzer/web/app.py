@@ -123,7 +123,7 @@ def browse(request: Request):
 async def categorize_now(request: Request):
     """Run Claude categorization. Accepts JSON body
     {"categories":[{"name":"...","description":"..."}]} or form field
-    categories / categories_json."""
+    categories."""
     defs: list = []
     content_type = (request.headers.get("content-type") or "").lower()
     if "application/json" in content_type:
@@ -137,22 +137,17 @@ async def categorize_now(request: Request):
             return JSONResponse(
                 {"ok": False, "error": "JSON body must be an object."}, status_code=400
             )
-        defs = organize.normalize_categories(body.get("categories") or [])
+        cats = body.get("categories") or []
+        if not isinstance(cats, list):
+            return JSONResponse(
+                {"ok": False, "error": "'categories' must be a list."}, status_code=400
+            )
+        defs = organize.normalize_categories(cats)
     else:
         form = await request.form()
-        raw_json = str(form.get("categories_json") or "").strip()
-        if raw_json:
-            try:
-                parsed = json.loads(raw_json)
-            except json.JSONDecodeError:
-                return JSONResponse(
-                    {"ok": False, "error": "Invalid categories_json."}, status_code=400
-                )
-            defs = organize.normalize_categories(parsed if isinstance(parsed, list) else [])
-        else:
-            raw = str(form.get("categories") or "").strip()
-            if raw:
-                defs = organize.normalize_categories(_parse_categories(raw))
+        raw = str(form.get("categories") or "").strip()
+        if raw:
+            defs = organize.normalize_categories(_parse_categories(raw))
 
     if not defs:
         return JSONResponse(

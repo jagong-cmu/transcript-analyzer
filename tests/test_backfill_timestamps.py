@@ -203,3 +203,69 @@ def test_replacing_twice_is_idempotent(note):
     once = backfill_timestamps._replace_transcript_section(note, "[0:00] Hi")
     twice = backfill_timestamps._replace_transcript_section(once, "[0:00] Hi")
     assert twice == once
+
+
+def test_owner_callout_below_the_transcript_is_not_indexed_as_transcript(cfg):
+    """End-to-end shape the migration now produces: the owner's own callout
+    survives below the transcript, so the indexer must stop where the backfill
+    stopped — otherwise their private follow-up is published in the /transcript
+    view and the RAG corpus as transcript content."""
+    from datetime import date
+
+    from transcript_analyzer.db import get_conn, get_transcript
+    from transcript_analyzer.models import Insight, Transcript
+    from transcript_analyzer.obsidian import writer
+    from transcript_analyzer.pipeline.indexer import index_note
+
+    transcript = Transcript(
+        id="bf1",
+        source="granola",
+        native_id="bn1",
+        title="raw",
+        date=date(2026, 7, 1),
+        text="Angela: untimed original.",
+    )
+    note = writer.write_note(cfg, transcript, Insight(headline="Pricing chat"))
+    note.write_text(
+        note.read_text(encoding="utf-8").rstrip("\n")
+        + "\n\n> [!tip] My own note\n> remember to follow up\n",
+        encoding="utf-8",
+    )
+
+    import frontmatter
+
+    post = frontmatter.load(str(note))
+    post.content = backfill_timestamps._replace_transcript_section(
+        post.content, "[0:00] Angela: timed line.\n\n[0:30] Angela: after a pause."
+    )
+    dumped = frontmatter.dumps(post)
+    note.write_text(dumped if dumped.endswith("\n") else dumped + "\n", encoding="utf-8")
+
+    assert index_note(cfg, note) is not None
+    with get_conn(cfg.db_path) as conn:
+        rec = get_transcript(conn, transcript.id)
+
+    assert rec is not None
+    assert rec.transcript_text == (
+        "[0:00] Angela: timed line.\n\n[0:30] Angela: after a pause."
+    )
+    assert "remember to follow up" not in rec.transcript_text
+    # And the owner's callout is still in the note itself.
+    assert "> [!tip] My own note" in note.read_text(encoding="utf-8")
+
+
+def test_already_timed_is_not_faked_by_an_owner_callout(cfg):
+    """_already_timed reads through the indexer, so a '[0:00]'-shaped line in
+    the owner's own callout must not make an untimed note look migrated."""
+    from transcript_analyzer.pipeline.indexer import _extract_transcript
+
+    note = (
+        "## Transcript\n"
+        "> [!note]- Full transcript\n"
+        "> Angela: untimed original.\n"
+        "\n"
+        "> [!tip] My own note\n"
+        "> [0:00] looks like a timestamp\n"
+    )
+    assert _extract_transcript(note) == "Angela: untimed original."
+    assert not backfill_timestamps._already_timed(_extract_transcript(note))

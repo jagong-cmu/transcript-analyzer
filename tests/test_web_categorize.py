@@ -5,48 +5,8 @@ per note, so running it on the event loop froze every other request — includin
 the page's own status poll — for the whole run.
 """
 import asyncio
-import importlib
-import json
-import sys
 
-import pytest
 from fastapi.testclient import TestClient
-
-APP_MODULE = "transcript_analyzer.web.app"
-
-
-@pytest.fixture
-def app_mod(tmp_path, monkeypatch):
-    """Import the dashboard against a scratch config (never the real vault).
-
-    web/app.py binds `cfg = load_config()` at module scope, so the module has
-    to be dropped from sys.modules and re-imported for each test to actually
-    get its own config instead of the first test's (deleted) tmp_path.
-    """
-    config = tmp_path / "config.toml"
-    config.write_text(
-        "[vault]\n"
-        f"path = {json.dumps(str(tmp_path / 'vault'))}\n"
-        'name = "Test Vault"\n'
-        'insights_folder = "Transcript Insights"\n'
-        "\n[pocket]\n"
-        'folder = "Pocket AI Recordings"\n'
-        "\n[anthropic]\n"
-        'api_key = "test-key"\n',
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("TRANSCRIPT_ANALYZER_CONFIG", str(config))
-
-    from transcript_analyzer.config import load_config
-
-    load_config.cache_clear()
-    sys.modules.pop(APP_MODULE, None)
-    app_module = importlib.import_module(APP_MODULE)
-
-    yield app_module
-
-    sys.modules.pop(APP_MODULE, None)
-    load_config.cache_clear()
 
 
 def test_categorize_runs_off_the_event_loop(app_mod, monkeypatch):
@@ -134,3 +94,47 @@ def test_fixture_binds_this_tests_config(app_mod, tmp_path):
     re-bound per test, or later tests silently run against a deleted tmp vault."""
     assert app_mod.cfg.vault.path == tmp_path / "vault"
     assert app_mod.cfg.vault.insights_path.parent == tmp_path / "vault"
+
+
+def test_a_non_list_categories_value_is_rejected(app_mod, monkeypatch):
+    """A bare string is a Sequence, so it used to yield one CategoryDef per
+    CHARACTER and run a REAL categorize pass: every rollup under Categories/
+    unlinked and one billable Anthropic call per note."""
+    calls = []
+    monkeypatch.setattr(
+        app_mod.organize, "categorize", lambda *a, **k: calls.append(k) or {}
+    )
+
+    with TestClient(app_mod.app) as client:
+        for bad in ("Hiring", {"name": "Hiring"}, 7):
+            r = client.post("/categorize", json={"categories": bad})
+            assert r.status_code == 400, f"{bad!r} was accepted"
+            assert r.json()["ok"] is False
+
+    assert calls == [], "categorize ran on a malformed categories value"
+
+
+def test_normalize_categories_ignores_a_non_list_argument():
+    """The library entry point is guarded too, not just the route."""
+    from transcript_analyzer.pipeline.organize import CategoryDef, normalize_categories
+
+    assert normalize_categories("Hiring") == []
+    assert normalize_categories({"name": "Hiring"}) == []
+    assert normalize_categories(["Hiring"]) == [CategoryDef("Hiring")]
+    assert normalize_categories((CategoryDef("Hiring"),)) == [CategoryDef("Hiring")]
+
+
+def test_categorize_json_form_field_is_gone(app_mod, monkeypatch):
+    """Only two input shapes remain: JSON, and the urlencoded 'categories'."""
+    calls = []
+    monkeypatch.setattr(
+        app_mod.organize, "categorize", lambda *a, **k: calls.append(k) or {}
+    )
+
+    with TestClient(app_mod.app) as client:
+        r = client.post(
+            "/categorize", data={"categories_json": '[{"name": "Hiring"}]'}
+        )
+
+    assert r.status_code == 400
+    assert calls == []

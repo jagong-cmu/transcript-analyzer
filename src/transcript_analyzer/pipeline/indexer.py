@@ -43,25 +43,33 @@ def _strip_wikilink(s: str) -> str:
 
 
 def _extract_transcript(body: str) -> str:
-    """Pull the transcript text out of the '## Transcript' callout block."""
+    """Pull the transcript text out of the '## Transcript' callout block.
+
+    The section is the heading, an optional run of blank lines, and then the
+    contiguous run of '>' lines that is the callout — the same grammar the
+    writer emits and the timestamp backfill rewrites. Reading past the end of
+    that run would fold a callout the vault owner appended below the transcript
+    into transcript_text, publishing it in the dashboard and the RAG corpus.
+    An interior blank transcript line is written as '> ', so it stays inside.
+    """
     lines = body.splitlines()
+    start = next(
+        (i for i, ln in enumerate(lines) if ln.strip().lower() == "## transcript"),
+        None,
+    )
+    if start is None:
+        return ""
+    i = start + 1
+    while i < len(lines) and not lines[i].strip():
+        i += 1
     out: list[str] = []
-    in_section = False
-    for ln in lines:
-        if ln.strip().lower() == "## transcript":
-            in_section = True
+    while i < len(lines) and lines[i].startswith(">"):
+        ln = lines[i]
+        i += 1
+        # skip the "[!note]- ..." callout header line
+        if ln.lstrip(">").strip().startswith("[!"):
             continue
-        if in_section:
-            if ln.startswith(">"):
-                # strip callout marker; skip the "[!note]- ..." header line
-                stripped = ln.lstrip(">").strip()
-                if stripped.startswith("[!"):
-                    continue
-                out.append(ln.lstrip(">")[1:] if ln.startswith("> ") else ln.lstrip(">"))
-            elif ln.strip() == "":
-                out.append("")
-            else:
-                break
+        out.append(ln.lstrip(">")[1:] if ln.startswith("> ") else ln.lstrip(">"))
     return "\n".join(out).strip()
 
 

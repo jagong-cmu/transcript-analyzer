@@ -109,7 +109,15 @@ CategoryInput = Union[str, CategoryDef, dict]
 
 
 def normalize_categories(categories: Sequence[CategoryInput]) -> list[CategoryDef]:
-    """Accept names, CategoryDef, or {name, description} dicts."""
+    """Accept a list of names, CategoryDefs, or {name, description} dicts.
+
+    Anything that is not a list/tuple yields no categories. A bare string is
+    itself a Sequence, so iterating one would quietly produce a CategoryDef per
+    CHARACTER — and categorize() acts on that: it clears every existing rollup
+    and spends one billable Anthropic call per note against the junk names.
+    """
+    if not isinstance(categories, (list, tuple)):
+        return []
     out: list[CategoryDef] = []
     seen: set[str] = set()
     for raw in categories:

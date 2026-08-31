@@ -1,3 +1,6 @@
+import importlib
+import json
+import sys
 from datetime import date
 from pathlib import Path
 
@@ -74,3 +77,40 @@ def make_transcript(title: str = "Team sync", text: str = "x" * 1000) -> Transcr
         date=date(2026, 7, 1),
         text=text,
     )
+
+
+APP_MODULE = "transcript_analyzer.web.app"
+
+
+@pytest.fixture
+def app_mod(tmp_path, monkeypatch):
+    """The dashboard imported against a scratch config (never the real vault).
+
+    web/app.py binds `cfg = load_config()` at module scope, so the module has
+    to be dropped from sys.modules and re-imported for each test to actually
+    get its own config instead of the first test's (deleted) tmp_path.
+    """
+    config = tmp_path / "config.toml"
+    config.write_text(
+        "[vault]\n"
+        f"path = {json.dumps(str(tmp_path / 'vault'))}\n"
+        'name = "Test Vault"\n'
+        'insights_folder = "Transcript Insights"\n'
+        "\n[pocket]\n"
+        'folder = "Pocket AI Recordings"\n'
+        "\n[anthropic]\n"
+        'api_key = "test-key"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TRANSCRIPT_ANALYZER_CONFIG", str(config))
+
+    from transcript_analyzer.config import load_config
+
+    load_config.cache_clear()
+    sys.modules.pop(APP_MODULE, None)
+    app_module = importlib.import_module(APP_MODULE)
+
+    yield app_module
+
+    sys.modules.pop(APP_MODULE, None)
+    load_config.cache_clear()

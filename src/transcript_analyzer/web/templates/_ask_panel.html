@@ -33,13 +33,32 @@
   const category = panel.dataset.category || '';
   const transcriptId = panel.dataset.transcriptId || '';
 
+  // Source fields are note content (an LLM-written headline, a note id), so
+  // they are built as DOM text and never as markup.
+  function renderSources(srcs) {
+    const frag = document.createDocumentFragment();
+    const heading = document.createElement('div');
+    heading.className = 'sources-title';
+    heading.textContent = 'Sources';
+    frag.appendChild(heading);
+    srcs.forEach((s, i) => {
+      if (i) frag.appendChild(document.createTextNode(' '));
+      const chip = document.createElement('a');
+      chip.className = 'source-chip';
+      chip.setAttribute('href', '/transcript/' + encodeURIComponent(s.id == null ? '' : s.id));
+      chip.textContent = `[${s.n == null ? '' : s.n}] ${s.title == null ? '' : s.title}`;
+      frag.appendChild(chip);
+    });
+    return frag;
+  }
+
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const q = form.querySelector('.ask-q').value.trim();
     if (!q) return;
     answerEl.classList.remove('muted');
     answerEl.textContent = '';
-    sourcesEl.innerHTML = '';
+    sourcesEl.replaceChildren();
 
     const body = new URLSearchParams({question: q});
     if (category) body.set('category', category);
@@ -72,8 +91,7 @@
         if (type === 'sources') {
           const srcs = JSON.parse(data);
           if (srcs.length) {
-            sourcesEl.innerHTML = '<div class="sources-title">Sources</div>' +
-              srcs.map(s => `<a class="source-chip" href="/transcript/${s.id}">[${s.n}] ${s.title}</a>`).join(' ');
+            sourcesEl.replaceChildren(renderSources(srcs));
           }
         } else if (type === 'done') {
           // finished
