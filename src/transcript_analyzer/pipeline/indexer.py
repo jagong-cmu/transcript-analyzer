@@ -84,6 +84,12 @@ def _extract_transcript(body: str) -> str:
 
 
 def _extract_summary(body: str) -> str:
+    """Body text under '## Summary', up to the next heading.
+
+    A section ENDS where writer.opens_section says a heading begins — the same
+    predicate that finds the start, so the two boundaries cannot disagree about
+    the same line (see AGENTS.md: add call sites, not second definitions).
+    """
     lines = body.splitlines()
     out: list[str] = []
     in_section = False
@@ -92,7 +98,7 @@ def _extract_summary(body: str) -> str:
             in_section = True
             continue
         if in_section:
-            if ln.startswith("## "):
+            if opens_section(ln):
                 break
             out.append(ln)
     return "\n".join(out).strip()
@@ -100,7 +106,8 @@ def _extract_summary(body: str) -> str:
 
 def _extract_action_items(body: str) -> list[tuple[str, bool]]:
     """(text, done) pairs from the '## Action Items' checkbox list. The note
-    is the source of truth: ticking a box in Obsidian closes the commitment."""
+    is the source of truth: ticking a box in Obsidian closes the commitment.
+    The section ends at the next `opens_section` heading, as above."""
     lines = body.splitlines()
     out: list[tuple[str, bool]] = []
     in_section = False
@@ -109,7 +116,7 @@ def _extract_action_items(body: str) -> list[tuple[str, bool]]:
             in_section = True
             continue
         if in_section:
-            if ln.startswith("## "):
+            if opens_section(ln):
                 break
             m = _CHECKBOX_RE.match(ln)
             if m:

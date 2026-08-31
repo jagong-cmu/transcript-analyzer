@@ -85,9 +85,7 @@ def _target_path(cfg, when: date, headline: str, transcript_id: str, current: Pa
     base = cfg.vault.insights_path / f"{when.isoformat()} {slug}.md"
     if base.resolve() == current.resolve():
         return current
-    if base.exists() and writer._existing_transcript_id(base) not in ("", transcript_id):
-        return cfg.vault.insights_path / f"{when.isoformat()} {slug} ({transcript_id[:6]}).md"
-    return base
+    return writer.claim_note_path(base, transcript_id)
 
 
 def _rename_with_audio(cfg, old: Path, new: Path, *, dry_run: bool) -> Path:

@@ -165,8 +165,13 @@ def _quote_block(text: str) -> str:
     return "\n".join(lines)
 
 
-def _existing_transcript_id(path: Path) -> str:
-    """Cheap read of the transcript_id from a note's frontmatter, if present."""
+def _existing_transcript_id(path: Path) -> str | None:
+    """Cheap read of the transcript_id from a note's frontmatter.
+
+    None means UNKNOWN — no `transcript_id:` line, or the file could not be
+    read at all — and is deliberately distinct from an id that is present but
+    empty, because `owns_note` must never treat unknown as a match.
+    """
     try:
         fences = 0
         for ln in path.read_text(encoding="utf-8").splitlines():
@@ -177,9 +182,43 @@ def _existing_transcript_id(path: Path) -> str:
                 continue
             if ln.startswith("transcript_id:"):
                 return ln.split(":", 1)[1].strip()
-    except OSError:
-        return ""
-    return ""
+    except (OSError, UnicodeDecodeError):
+        return None
+    return None
+
+
+def owns_note(path: Path, transcript_id: str) -> bool:
+    """Whether an existing file is PROVABLY this transcript's own note.
+
+    Ownership is proven, never assumed. A file whose id we cannot read back —
+    a hand-written note with no frontmatter, an unreadable or binary file — is
+    the vault owner's, not ours, and the vault has no backup: writing or
+    renaming over it destroys work nothing can recover.
+    """
+    if not transcript_id:
+        return False
+    return _existing_transcript_id(path) == transcript_id
+
+
+def claim_note_path(base: Path, transcript_id: str) -> Path:
+    """The path this transcript may safely occupy, preferring `base`.
+
+    The one definition of "where may this transcript's note go", shared by the
+    sync path (`note_path_for`) and the retitle migration, so the two cannot
+    drift. Free or already ours is `base`; anything else — another
+    transcript's note on the same date, a hand-written note, a file we cannot
+    read — falls through to `<stem> (<id6>).md` and keeps going rather than
+    landing on a file that is not ours.
+    """
+    if not base.exists() or owns_note(base, transcript_id):
+        return base
+    short = transcript_id[:6] or "note"
+    candidate = base.with_name(f"{base.stem} ({short}){base.suffix}")
+    n = 2
+    while candidate.exists() and not owns_note(candidate, transcript_id):
+        candidate = base.with_name(f"{base.stem} ({short}-{n}){base.suffix}")
+        n += 1
+    return candidate
 
 
 def note_headline(transcript: Transcript, insight: Insight) -> str:
@@ -190,12 +229,10 @@ def note_path_for(cfg: Config, transcript: Transcript, insight: Insight) -> Path
     root = cfg.vault.insights_path
     headline = note_headline(transcript, insight)
     base = root / _safe_filename(headline, transcript.date.isoformat())
-    # Guarantee uniqueness: if a DIFFERENT transcript already owns this filename
-    # (two titles that slugify identically on the same date), append a short id.
-    if base.exists() and _existing_transcript_id(base) not in ("", transcript.id):
-        stem = base.stem
-        return root / f"{stem} ({transcript.id[:6]}).md"
-    return base
+    # Guarantee uniqueness AND ownership: a filename we cannot prove is this
+    # transcript's own (another transcript whose title slugifies the same on
+    # the same date, or a note the vault owner wrote) gets a short-id suffix.
+    return claim_note_path(base, transcript.id)
 
 
 def render_note(transcript: Transcript, insight: Insight, audio_name: str | None = None) -> str:

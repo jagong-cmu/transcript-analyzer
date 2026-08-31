@@ -11,10 +11,19 @@ from typing import Union
 
 DateLike = Union[date, datetime, str]
 
+# The one source of month names: the composer writes these and the stripper
+# removes exactly these. strftime('%B') would follow LC_TIME, so a process that
+# set a non-English locale would compose a suffix this regex cannot strip and
+# every re-sync would stack another date onto the title.
+_MONTH_NAMES = (
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+)
+
 _LEADING_ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}\s+")
 _TRAILING_LONG_DATE = re.compile(
     r",?\s+"
-    r"(?:January|February|March|April|May|June|July|August|September|October|November|December)"
+    r"(?:" + "|".join(_MONTH_NAMES) + r")"
     r"\s+\d{1,2}(?:st|nd|rd|th),\s+\d{4}\s*$",
     re.IGNORECASE,
 )
@@ -39,7 +48,7 @@ def parse_date(when: DateLike) -> date:
 def format_long_date(when: DateLike) -> str:
     """e.g. July 26th, 2026"""
     d = parse_date(when)
-    return f"{d.strftime('%B')} {ordinal_day(d.day)}, {d.year}"
+    return f"{_MONTH_NAMES[d.month - 1]} {ordinal_day(d.day)}, {d.year}"
 
 
 def clean_headline(headline: str) -> str:

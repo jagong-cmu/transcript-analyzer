@@ -63,3 +63,35 @@ def test_headline_from_summary_edge_cases():
     # Re-composing an already-composed title does not stack date suffixes.
     once = compose_display_title("Pricing deck review", date(2026, 7, 26))
     assert compose_display_title(once, date(2026, 7, 26)) == once
+
+
+def test_long_date_is_locale_independent():
+    """The composer writes month names the stripper knows.
+
+    strftime('%B') follows LC_TIME, so under a non-English locale the suffix
+    compose_display_title appends could no longer be stripped by the regex that
+    exists to strip it — and every re-sync stacked another date on the title.
+    """
+    import locale
+
+    import pytest
+
+    saved = locale.setlocale(locale.LC_TIME)
+    try:
+        for name in ("de_DE.UTF-8", "de_DE.utf8", "fr_FR.UTF-8", "es_ES.UTF-8", "de_DE"):
+            try:
+                locale.setlocale(locale.LC_TIME, name)
+            except locale.Error:
+                continue
+            if date(2026, 7, 1).strftime("%B") != "July":
+                break
+        else:
+            pytest.skip("no non-English LC_TIME locale available on this runner")
+
+        assert format_long_date(date(2026, 7, 1)) == "July 1st, 2026"
+        once = compose_display_title("Pricing deck review", date(2026, 7, 1))
+        assert once == "Pricing deck review, July 1st, 2026"
+        # Re-composing (a re-sync, or a retitle re-run) must not stack a date.
+        assert compose_display_title(once, date(2026, 7, 1)) == once
+    finally:
+        locale.setlocale(locale.LC_TIME, saved)

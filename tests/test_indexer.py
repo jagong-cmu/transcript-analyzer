@@ -512,3 +512,42 @@ def test_opens_section_is_the_one_definition_both_sides_use():
     assert is_section_start("\xa0## Transcript", "## transcript")
     assert not is_section_start("\xa0\\## Transcript", "## transcript")
     assert not is_section_start("#transcript", "## transcript")
+
+
+HAND_EDITED_UNICODE_HEADINGS = """---
+source: granola
+date: 2026-07-01
+transcript_id: t18
+headline: "Hand edited"
+---
+
+# Hand edited, July 1st, 2026
+
+## Summary
+Real summary.
+ ## Action Items
+- [ ] Ship the deck
+  ## Transcript
+> [!note]- Full transcript
+> Angela: the real transcript.
+"""
+
+
+def test_sections_end_where_the_shared_predicate_says_they_do(cfg):
+    """Section START and section END are the one `opens_section` question.
+
+    The end used to be a narrower `startswith('## ')`, so a hand-edited note
+    whose next heading is Unicode- or space-indented was swallowed into the
+    section above it — even though the same line opened a section for the
+    extractor below. Two rules for one question is what AGENTS.md forbids.
+    """
+    p = write(cfg.vault.insights_path / "2026-07-01 hand-edited.md",
+              HAND_EDITED_UNICODE_HEADINGS)
+
+    rec = indexer.parse_note(p)
+
+    assert rec is not None
+    assert rec.summary == "Real summary."
+    assert rec.action_items == ["Ship the deck"]
+    assert rec.open_action_items == ["Ship the deck"]
+    assert rec.transcript_text == "Angela: the real transcript."
