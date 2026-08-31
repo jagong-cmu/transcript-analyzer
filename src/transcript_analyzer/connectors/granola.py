@@ -172,35 +172,55 @@ class GranolaClient:
             return other
         return ""
 
-    @staticmethod
-    def _transcript_text(detail: dict) -> str:
-        segments = detail.get("transcript") or []
-        owner, other = GranolaClient._channel_labels(detail)
-        lines: list[str] = []
-        prev = None
-        for seg in segments:
-            if not isinstance(seg, dict):
-                continue
+    @classmethod
+    def _transcript_segments(cls, detail: dict) -> list:
+        from ..models import TranscriptSegment
+        from ..transcript_fmt import relative_seconds_from_iso
+
+        raw = [seg for seg in (detail.get("transcript") or []) if isinstance(seg, dict)]
+        owner, other = cls._channel_labels(detail)
+        starts = [seg.get("start_time") or seg.get("start") for seg in raw]
+        # Prefer ISO wall-clock → relative; else numeric start fields.
+        rel = relative_seconds_from_iso(
+            [s if isinstance(s, str) else None for s in starts]
+        )
+        from ..transcript_fmt import coerce_seconds
+
+        segments: list[TranscriptSegment] = []
+        for i, seg in enumerate(raw):
             text = (seg.get("text") or "").strip()
             if not text:
                 continue
-            label = GranolaClient._seg_label(seg, owner, other)
-            if label and label != prev:
-                lines.append(f"{label}: {text}")
-                prev = label
-            else:
-                lines.append(text)
-        text = "\n".join(lines).strip()
-        if not text:
-            # No spoken transcript available — fall back to Granola's own summary.
-            text = (detail.get("summary_markdown") or detail.get("summary_text") or "").strip()
-        return text
+            start = rel[i]
+            if start is None:
+                start = coerce_seconds(seg.get("start_time") or seg.get("start"))
+            end = coerce_seconds(seg.get("end_time") or seg.get("end"))
+            segments.append(
+                TranscriptSegment(
+                    text=text,
+                    speaker=cls._seg_label(seg, owner, other),
+                    start_sec=start,
+                    end_sec=end,
+                )
+            )
+        return segments
+
+    @classmethod
+    def _transcript_text(cls, detail: dict) -> tuple[str, list]:
+        from ..transcript_fmt import format_segments
+
+        segments = cls._transcript_segments(detail)
+        if segments:
+            return format_segments(segments), segments
+        # No spoken transcript available — fall back to Granola's own summary.
+        text = (detail.get("summary_markdown") or detail.get("summary_text") or "").strip()
+        return text, []
 
     def to_transcript(self, detail: dict) -> Optional[Transcript]:
         note_id = detail.get("id")
         if not note_id:
             return None
-        text = self._transcript_text(detail)
+        text, segments = self._transcript_text(detail)
         if not text:
             return None
         created = detail.get("created_at") or detail.get("updated_at")
@@ -213,6 +233,7 @@ class GranolaClient:
             participants=self._participants(detail),
             attendees=self._attendees(detail),
             text=text,
+            segments=segments,
             source_ref=detail.get("web_url") or str(note_id),
             remote_sort_key=str(created or ""),
         )

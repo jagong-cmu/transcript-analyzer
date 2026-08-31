@@ -30,6 +30,7 @@ from .pipeline.indexer import index_note
 from .pipeline.insights import extract_insight
 from .pipeline.llm import LLM, LLMBudgetError, LLMKillSwitchError
 from .pipeline.quality import junk_reason
+from .titles import compose_display_title
 
 FAILURE_COUNTER_KEY = "insight_failures_total"
 
@@ -106,9 +107,12 @@ def process_transcript(
     dry_run: bool = False,
 ) -> dict:
     insight = extract_insight(transcript, cfg, llm=llm)
+    display = compose_display_title(
+        insight.headline or transcript.title, transcript.date
+    )
     result = {
         "id": transcript.id,
-        "title": transcript.title,
+        "title": display,
         "source": transcript.source,
         "note_path": None,
     }

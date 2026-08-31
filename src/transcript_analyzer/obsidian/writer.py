@@ -6,8 +6,10 @@ writes non-destructive index (MOC) notes under `<insights_folder>/Categories/`.
 
   <insights_folder>/
     <insights_folder>.md                 hub, notes grouped by month
-    <YYYY-MM-DD> <title>.md              one note per transcript (flat)
+    <YYYY-MM-DD> <headline-slug>.md      one note per transcript (flat)
     Categories/<Category>.md             (created on demand by `categorize`)
+
+Each note's H1 / indexed title is ``{headline}, July 26th, 2026``.
 """
 from __future__ import annotations
 
@@ -18,6 +20,7 @@ from slugify import slugify
 
 from ..config import Config
 from ..models import Insight, Transcript
+from ..titles import clean_headline, compose_display_title, format_long_date
 
 CATEGORIES_SUBDIR = "Categories"
 ATTACHMENTS_SUBDIR = "Attachments"
@@ -39,8 +42,8 @@ def audio_path_for(cfg: Config, note_path: Path) -> Path:
     return attachments_dir(cfg) / f"{note_path.stem}.mp3"
 
 
-def _safe_filename(title: str, when: str) -> str:
-    slug = slugify(title, max_length=80) or "untitled"
+def _safe_filename(headline: str, when: str) -> str:
+    slug = slugify(headline, max_length=80) or "untitled"
     return f"{when} {slug}.md"
 
 
@@ -74,9 +77,14 @@ def _existing_transcript_id(path: Path) -> str:
     return ""
 
 
+def note_headline(transcript: Transcript, insight: Insight) -> str:
+    return clean_headline(insight.headline) or clean_headline(transcript.title) or "Untitled conversation"
+
+
 def note_path_for(cfg: Config, transcript: Transcript, insight: Insight) -> Path:
     root = cfg.vault.insights_path
-    base = root / _safe_filename(transcript.title, transcript.date.isoformat())
+    headline = note_headline(transcript, insight)
+    base = root / _safe_filename(headline, transcript.date.isoformat())
     # Guarantee uniqueness: if a DIFFERENT transcript already owns this filename
     # (two titles that slugify identically on the same date), append a short id.
     if base.exists() and _existing_transcript_id(base) not in ("", transcript.id):
@@ -87,11 +95,15 @@ def note_path_for(cfg: Config, transcript: Transcript, insight: Insight) -> Path
 
 def render_note(transcript: Transcript, insight: Insight, audio_name: str | None = None) -> str:
     people_links = [_wikilink(p) for p in insight.people]
+    headline = note_headline(transcript, insight)
+    display_title = compose_display_title(headline, transcript.date)
+    safe_headline = headline.replace('"', "'")
 
     fm_lines = ["---"]
     fm_lines.append(f"source: {transcript.source}")
     fm_lines.append(f"date: {transcript.date.isoformat()}")
     fm_lines.append(f"transcript_id: {transcript.id}")
+    fm_lines.append(f'headline: "{safe_headline}"')
     fm_lines.append("people:")
     for p in people_links:
         fm_lines.append(f'  - "{p}"')
@@ -111,10 +123,10 @@ def render_note(transcript: Transcript, insight: Insight, audio_name: str | None
         fm_lines.append(f"sentiment: {insight.sentiment}")
     fm_lines.append("---")
 
-    body = [f"# {transcript.title}", ""]
+    body = [f"# {display_title}", ""]
     if people_links:
         body.append("**People:** " + ", ".join(people_links))
-    body.append(f"**Source:** {transcript.source}  ·  **Date:** {transcript.date.isoformat()}")
+    body.append(f"**Source:** {transcript.source}  ·  **Date:** {format_long_date(transcript.date)}")
     body.append("")
     if audio_name:
         body.append("## Recording")

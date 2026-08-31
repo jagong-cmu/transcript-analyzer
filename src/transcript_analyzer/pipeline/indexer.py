@@ -23,6 +23,7 @@ import frontmatter
 from ..config import Config
 from ..db import get_conn, upsert_transcript
 from ..models import Attendee, NoteRecord
+from ..titles import clean_headline, compose_display_title, headline_from_summary
 
 _WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 _CHECKBOX_RE = re.compile(r"^\s*-\s*\[( |x|X)\]\s*(.+?)\s*$")
@@ -132,10 +133,19 @@ def parse_note(path: Path) -> Optional[NoteRecord]:
         action_items = fm_action_items
         open_items = fm_action_items
 
+    summary = _extract_summary(post.content)
+    headline = clean_headline(str(meta.get("headline") or ""))
+    if not headline:
+        # Legacy notes: prefer H1 with date stripped, else first summary sentence.
+        headline = clean_headline(_extract_h1(post.content)) or headline_from_summary(
+            summary, fallback=path.stem
+        )
+    display_title = compose_display_title(headline, date_str) if date_str else headline
+
     return NoteRecord(
         transcript_id=str(tid),
         source=str(meta.get("source", "unknown")),
-        title=path.stem,
+        title=display_title,
         date=date_str,
         category="",  # categories are tracked separately (note_categories), not in note frontmatter
         people=people,
@@ -143,10 +153,17 @@ def parse_note(path: Path) -> Optional[NoteRecord]:
         action_items=action_items,
         open_action_items=open_items,
         attendees=_parse_attendees(meta),
-        summary=_extract_summary(post.content),
+        summary=summary,
         note_path=str(path.resolve()),
         transcript_text=_extract_transcript(post.content),
     )
+
+
+def _extract_h1(body: str) -> str:
+    for ln in body.splitlines():
+        if ln.startswith("# "):
+            return ln[2:].strip()
+    return ""
 
 
 def _iter_note_paths(cfg: Config):

@@ -205,6 +205,26 @@ h3 { font-size: 14px; margin: 16px 0 8px; color: var(--muted); text-transform: u
   border-radius: 10px; padding: 16px; font-size: 13px; color: var(--text);
   max-height: 520px; overflow: auto;
 }
+.timed-transcript {
+  white-space: normal; background: var(--panel); border: 1px solid var(--border);
+  border-radius: 10px; padding: 12px 14px; font-size: 14px; color: var(--text);
+  max-height: 640px; overflow: auto; line-height: 1.55;
+}
+.t-line {
+  display: grid; grid-template-columns: 64px 1fr; gap: 10px;
+  padding: 4px 6px; border-radius: 6px;
+}
+.t-line.t-blank { min-height: 0.6em; }
+.t-line.active { background: var(--accent-soft); }
+.t-ts {
+  font-variant-numeric: tabular-nums; font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--accent); background: transparent; border: none; padding: 0; text-align: left;
+  cursor: pointer;
+}
+.t-ts:hover { text-decoration: underline; }
+.t-ts.static { color: var(--muted); cursor: default; }
+.t-text { color: var(--text); }
+.audio-section { margin-bottom: 14px; }
 details summary { cursor: pointer; color: var(--accent); margin-bottom: 10px; }
 
 .ask-form { display: flex; gap: 10px; margin-bottom: 18px; }
@@ -219,6 +239,32 @@ details summary { cursor: pointer; color: var(--accent); margin-bottom: 10px; }
 .ask-panel { margin: 22px 0; }
 .checklist.compact { margin-top: 6px; }
 .checklist.compact li { padding: 2px 0; font-size: 13px; color: var(--muted); }
+
+.cat-def-head, .cat-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 0.7fr) minmax(220px, 1.6fr) 40px;
+  gap: 10px;
+  align-items: center;
+}
+.cat-def-head {
+  font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--muted); margin-bottom: 8px;
+}
+.cat-rows { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
+.cat-row input {
+  width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border);
+  background: var(--panel-2); color: var(--text); font-size: 14px;
+}
+.cat-def-actions { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.category-scope {
+  margin: 8px 0 0; color: var(--muted); font-size: 14px; max-width: 52rem;
+}
+@media (max-width: 700px) {
+  .cat-def-head { display: none; }
+  .cat-row { grid-template-columns: 1fr 40px; }
+  .cat-row .cat-desc { grid-column: 1 / -1; }
+}
+
 .sources { margin-bottom: 14px; }
 .sources-title { font-size: 12px; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
 .source-chip {

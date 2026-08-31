@@ -1,10 +1,14 @@
 """Category rollups: citation gate + change detection + categorize wiring."""
 from conftest import make_record
 
-from transcript_analyzer.db import get_conn, set_note_category, upsert_transcript
+from transcript_analyzer.db import get_conn, get_meta, set_note_category, upsert_transcript
 from transcript_analyzer.obsidian.writer import SYNTH_BEGIN
 from transcript_analyzer.pipeline.organize import (
+    DEFS_META_KEY,
+    CategoryDef,
     categorize,
+    load_category_definitions,
+    normalize_categories,
     reset_categories,
     write_category_rollup,
 )
@@ -20,9 +24,11 @@ class FakeLLM:
             "open_threads": [],
         }
         self.calls = 0
+        self.users: list[str] = []
 
     def chat_json(self, system, user, schema, **kw):
         self.calls += 1
+        self.users.append(user)
         props = schema.get("properties", {})
         if "category" in props:
             for needle, cat in self.classify_map.items():
@@ -30,6 +36,41 @@ class FakeLLM:
                     return {"category": cat}
             return {"category": "None"}
         return self.rollup
+
+
+def test_normalize_name_colon_description():
+    defs = normalize_categories(
+        [
+            "Fundraising: LP updates and term sheets",
+            "Hiring",
+            {"name": "Product", "description": "Roadmap"},
+        ]
+    )
+    assert defs[0] == CategoryDef("Fundraising", "LP updates and term sheets")
+    assert defs[1] == CategoryDef("Hiring", "")
+    assert defs[2] == CategoryDef("Product", "Roadmap")
+
+
+def test_classify_prompt_includes_description(cfg):
+    notes = [
+        make_record(
+            tid="t1",
+            title="2026-07-01 raise",
+            summary="Talked to an LP about the round.",
+        )
+    ]
+    with get_conn(cfg.db_path) as conn:
+        upsert_transcript(conn, notes[0])
+    llm = FakeLLM(classify_map={"raise": "Fundraising"})
+    categorize(
+        cfg,
+        [CategoryDef("Fundraising", "Investor updates, term sheets, raise strategy")],
+        llm=llm,
+        verbose=False,
+    )
+    assert any("Investor updates, term sheets, raise strategy" in u for u in llm.users)
+    defs = load_category_definitions(cfg)
+    assert defs[0].description.startswith("Investor updates")
 
 
 def test_write_category_rollup_citation_gate(cfg):
@@ -65,7 +106,9 @@ def test_write_category_rollup_citation_gate(cfg):
             ],
         }
     )
-    out = write_category_rollup(cfg, llm, "Fundraising", notes, force=True)
+    out = write_category_rollup(
+        cfg, llm, "Fundraising", notes, description="LP conversations", force=True
+    )
     assert out["dropped_claims"] == 1
     assert out["themes"] == 1
     path = cfg.vault.insights_path / "Categories" / "Fundraising.md"
@@ -73,8 +116,10 @@ def test_write_category_rollup_citation_gate(cfg):
     assert SYNTH_BEGIN in text
     assert "Angela will review the deck." in text
     assert "Fabricated theme." not in text
+    assert "_Scope: LP conversations_" in text
     assert "- [ ] Send deck" in text
     assert "[[2026-07-01 lp-call]]" in text
+    assert "Purpose: LP conversations" in llm.users[-1]
 
 
 def test_category_rollup_change_detection(cfg):
@@ -97,11 +142,15 @@ def test_category_rollup_change_detection(cfg):
     out = write_category_rollup(cfg, llm, "Product", notes, force=False)
     assert out == {"unchanged": 1}
     assert llm.calls == 1
+    write_category_rollup(cfg, llm, "Product", notes, description="new scope", force=False)
+    assert llm.calls == 2
 
 
 def test_categorize_writes_rollups(cfg):
     notes = [
-        make_record(tid="t1", title="2026-07-01 raise", summary="LP call about pricing deck review."),
+        make_record(
+            tid="t1", title="2026-07-01 raise", summary="LP call about pricing deck review."
+        ),
         make_record(tid="t2", title="2026-07-02 hire", summary="Interview loop."),
     ]
     with get_conn(cfg.db_path) as conn:
@@ -122,7 +171,6 @@ def test_categorize_writes_rollups(cfg):
             "open_threads": [],
         },
     )
-    # Rollup FakeLLM returns same payload for both categories; t2 claim will drop for Hiring.
     summary = categorize(cfg, ["Fundraising", "Hiring"], llm=llm, verbose=False)
     assert summary["assigned"] == 2
     assert "Fundraising" in summary["rollups"]
@@ -148,10 +196,17 @@ def test_reset_clears_hashes(cfg):
         notes,
         force=True,
     )
+    categorize(
+        cfg,
+        [CategoryDef("X", "desc")],
+        llm=FakeLLM(classify_map={"a": "X"}),
+        verbose=False,
+    )
     reset_categories(cfg, verbose=False)
     assert not (cfg.vault.insights_path / "Categories").exists()
     with get_conn(cfg.db_path) as conn:
         n = conn.execute(
             "SELECT COUNT(*) AS c FROM meta WHERE key LIKE 'category_hash:%'"
         ).fetchone()["c"]
+        assert get_meta(conn, DEFS_META_KEY) is None
     assert n == 0

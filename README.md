@@ -36,8 +36,9 @@ Pocket API  ──┘   (junk filter -> insights)   └─> SQLite index    (der
 - A **junk filter** drops test recordings and background noise at ingest, before any billable
   LLM call.
 - Insight notes are written **flat, organized by recording date** into `Transcript Insights/`
-  (the canonical store). Attendee **emails are persisted** in frontmatter — they're the stable
-  person-identity key that powers dossiers and meeting prep.
+  (the canonical store). Each note’s title is a descriptive one-liner with a long date
+  (e.g. `Pricing deck review with Angela, July 1st, 2026`). Attendee **emails are persisted**
+  in frontmatter — they're the stable person-identity key that powers dossiers and meeting prep.
 - **Synthesis runs at most once per day** (not per sync cycle) and writes only into
   `Digests/`, `People/`, `Studies/`, and `Prep/` — inside managed regions
   (`<!-- synth:begin -->` … `<!-- synth:end -->`), so anything you write outside the markers
@@ -51,7 +52,8 @@ Pocket API  ──┘   (junk filter -> insights)   └─> SQLite index    (der
   embeddings, no top-k) and pulls full transcripts on demand — speaker labels, dates, and
   proper nouns stay exact.
 - **Pocket audio** is downloaded into `Transcript Insights/Attachments/` and embedded in each
-  note. Granola's API exposes no audio.
+  note. Transcript lines include `[M:SS]` timestamps you can click in the dashboard to seek
+  the recording. Granola's API exposes no audio (timestamps still appear for reference).
 
 ## Cost guard
 
@@ -107,12 +109,16 @@ Notes are organized by date. To group them into categories *you* choose, run:
 
 ```bash
 ./.venv/bin/python scripts/categorize.py Fundraising Hiring Product Personal
+# With descriptions (steers matching):
+./.venv/bin/python scripts/categorize.py \
+  "Fundraising: LP updates, term sheets, raise strategy" \
+  "Hiring: interviews, offer loops, recruiting debriefs"
 ```
 
-Claude assigns each note to one of your categories (or none), synthesizes a
-scoped briefing (themes + open threads) per category, and writes non-destructive
+Claude uses each category’s description to place notes, synthesizes a scoped
+briefing (themes + open threads) per category, and writes non-destructive
 Category notes under `Transcript Insights/Categories/`. Re-run anytime with a
-different list; `--reset` clears it.
+different list; `--reset` clears it. The Browse page has the same UI.
 
 ### Background automation (launchd)
 

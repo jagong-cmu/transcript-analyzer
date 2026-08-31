@@ -57,12 +57,24 @@ def test_parse_note_round_trip(cfg):
     rec = indexer.parse_note(p)
     assert rec is not None
     assert rec.transcript_id == "abc123"
+    assert rec.title == "Chat with Angela, July 1st, 2026"
     assert rec.action_items == ["Review the deck", "Send the recap"]
     # Checkbox state comes from the body: the ticked item is closed.
     assert rec.open_action_items == ["Review the deck"]
     assert rec.attendees[0].email == "angela@example.com"
     assert rec.attendees[0].key == "angela@example.com"
     assert "I will review the deck." in rec.transcript_text
+
+
+def test_parse_note_uses_headline_frontmatter(cfg):
+    note = NOTE.replace(
+        "transcript_id: abc123\n",
+        'transcript_id: abc123\nheadline: "Pricing deck review with Angela"\n',
+    ).replace("# Chat with Angela", "# Pricing deck review with Angela, July 1st, 2026")
+    p = write(cfg.vault.insights_path / "2026-07-01 pricing.md", note)
+    rec = indexer.parse_note(p)
+    assert rec is not None
+    assert rec.title == "Pricing deck review with Angela, July 1st, 2026"
 
 
 def test_synth_notes_never_parsed(cfg):

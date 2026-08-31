@@ -128,47 +128,69 @@ class PocketClient:
         return f"Speaker {int(m.group(1)) + 1}" if m else str(speaker).strip()
 
     @staticmethod
-    def _transcript_text(detail: dict) -> str:
+    def _iter_raw_segments(detail: dict):
+        """Yield segment dicts from either public-API or webhook transcript shapes."""
+        tr = detail.get("transcript")
+        if isinstance(tr, dict):
+            for seg in tr.get("segments") or []:
+                if isinstance(seg, dict):
+                    yield seg
+            return
+        if isinstance(tr, list):
+            for seg in tr:
+                if isinstance(seg, dict):
+                    yield seg
+
+    @classmethod
+    def _transcript_segments(cls, detail: dict) -> list:
+        from ..models import TranscriptSegment
+        from ..transcript_fmt import coerce_seconds, format_segments
+
+        segments: list[TranscriptSegment] = []
+        for seg in cls._iter_raw_segments(detail):
+            t = (seg.get("text") or "").strip()
+            if not t:
+                continue
+            segments.append(
+                TranscriptSegment(
+                    text=t,
+                    speaker=cls._speaker_label(seg.get("speaker")),
+                    start_sec=coerce_seconds(seg.get("start")),
+                    end_sec=coerce_seconds(seg.get("end")),
+                )
+            )
+        return segments
+
+    @classmethod
+    def _transcript_text(cls, detail: dict) -> tuple[str, list]:
+        from ..transcript_fmt import format_segments
+
+        segments = cls._transcript_segments(detail)
+        if segments:
+            return format_segments(segments), segments
+
         tr = detail.get("transcript") or {}
         if isinstance(tr, dict):
-            # Prefer diarized segments so each turn is attributed to a speaker.
-            lines: list[str] = []
-            prev = None
-            for seg in tr.get("segments") or []:
-                if not isinstance(seg, dict):
-                    continue
-                t = (seg.get("text") or "").strip()
-                if not t:
-                    continue
-                name = PocketClient._speaker_label(seg.get("speaker"))
-                if name and name != prev:
-                    lines.append(f"{name}: {t}")
-                    prev = name
-                else:
-                    lines.append(t)
-            if lines:
-                return "\n".join(lines)
-            # No diarization for this recording — fall back to flat text.
             flat = (tr.get("text") or "").strip()
             if flat:
-                return flat
+                return flat, []
         # Last resort: a Pocket summary.
         summ = detail.get("summarizations")
         if isinstance(summ, dict):
             for v in summ.values():
                 if isinstance(v, str) and v.strip():
-                    return v.strip()
+                    return v.strip(), []
                 if isinstance(v, dict):
                     for vv in v.values():
                         if isinstance(vv, str) and vv.strip():
-                            return vv.strip()
-        return ""
+                            return vv.strip(), []
+        return "", []
 
     def to_transcript(self, detail: dict) -> Optional[Transcript]:
         rec_id = detail.get("id")
         if not rec_id:
             return None
-        text = self._transcript_text(detail)
+        text, segments = self._transcript_text(detail)
         if not text:
             return None
         created = detail.get("recording_at") or detail.get("created_at")
@@ -182,6 +204,7 @@ class PocketClient:
             date=_parse_date(created),
             participants=[],
             text=text,
+            segments=segments,
             source_ref=str(rec_id),
             remote_sort_key=str(detail.get("created_at") or created or ""),
         )
