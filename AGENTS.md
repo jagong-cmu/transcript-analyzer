@@ -32,6 +32,11 @@ against a scratch vault instead of the real one.
   blank line is emitted as `> `, which is what makes a truly blank line an unambiguous end of
   the callout. Disagreement here silently duplicates a transcript, or splices away whatever
   the vault owner appended below it.
+- **Where writer and reader must agree, they share ONE definition rather than two matching
+  rules.** "Does this line open a section?" is `writer.opens_section`, used by
+  `_body_text` to decide what to escape and by `indexer.is_section_start` (and through it
+  the backfill) to find sections. Re-deriving that test on either side is how the escape and
+  the parse drifted apart before — twice. Add call sites, not second definitions.
 - Scripts under `scripts/` write to the *live* vault and call the Pocket/Granola/Anthropic
   APIs. Use `--dry-run`/`--limit` when exercising them.
 

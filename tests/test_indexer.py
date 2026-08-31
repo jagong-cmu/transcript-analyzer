@@ -2,6 +2,8 @@
 re-ingested, and checkbox state / attendee emails must survive the parse."""
 from pathlib import Path
 
+import pytest
+
 from transcript_analyzer.pipeline import indexer
 
 NOTE = """---
@@ -447,3 +449,66 @@ def test_a_heading_shaped_summary_line_still_cannot_open_a_section(cfg):
         assert rec.transcript_text == "Angela: the real transcript.", injected
         assert "Real summary." in rec.summary
         assert "injected line" in rec.summary
+
+
+@pytest.mark.parametrize(
+    "indent",
+    ["", " ", "  ", "\t", "\xa0", " ", " ", " ", " ", "　"],
+    ids=[
+        "none", "space", "spaces", "tab", "nbsp", "en-quad",
+        "thin", "ogham", "medium-math", "ideographic",
+    ],
+)
+def test_no_indentation_lets_a_summary_heading_open_a_section(cfg, indent):
+    """The writer's escape and the indexer's section scan have to agree about
+    what counts as indentation. They did not for Unicode separators: str.strip()
+    drops all of them, so an indented '## Transcript' in the summary slipped
+    past the escape and stole the note's transcript in the index."""
+    from datetime import date as _date
+
+    from transcript_analyzer.models import Insight, Transcript
+    from transcript_analyzer.obsidian import writer
+
+    transcript = Transcript(
+        id="t17",
+        source="granola",
+        native_id="n17",
+        title="raw",
+        date=_date(2026, 7, 1),
+        text="Angela: the real transcript.",
+    )
+    insight = Insight(
+        headline="Injection",
+        summary=f"Real summary.\n{indent}## Transcript\n> injected line",
+    )
+    p = write(
+        cfg.vault.insights_path / "2026-07-01 unicode-indent.md",
+        writer.render_note(transcript, insight),
+    )
+
+    rec = indexer.parse_note(p)
+    assert rec is not None
+    assert rec.transcript_text == "Angela: the real transcript."
+    assert "Real summary." in rec.summary
+    assert "injected line" in rec.summary
+
+
+def test_opens_section_is_the_one_definition_both_sides_use():
+    """The writer escapes exactly what the reader would treat as a heading."""
+    from transcript_analyzer.obsidian.writer import _body_text, opens_section
+    from transcript_analyzer.pipeline.indexer import is_section_start
+
+    headings = ["## Transcript", "\xa0## transcript", "  # Title", "###### x", "##"]
+    not_headings = ["#hiring is the theme", "#1 priority is pricing", "C# notes", ""]
+
+    for ln in headings:
+        assert opens_section(ln), ln
+        assert _body_text(ln) != ln, ln
+    for ln in not_headings:
+        assert not opens_section(ln), ln
+        assert _body_text(ln) == ln, ln
+
+    # And the reader's named-section test is built on the same predicate.
+    assert is_section_start("\xa0## Transcript", "## transcript")
+    assert not is_section_start("\xa0\\## Transcript", "## transcript")
+    assert not is_section_start("#transcript", "## transcript")

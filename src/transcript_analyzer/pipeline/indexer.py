@@ -24,6 +24,7 @@ import frontmatter
 from ..config import Config
 from ..db import get_conn, upsert_transcript
 from ..models import Attendee, NoteRecord
+from ..obsidian.writer import opens_section
 from ..titles import clean_headline, compose_display_title, headline_from_summary
 
 _log = logging.getLogger(__name__)
@@ -35,6 +36,15 @@ _CHECKBOX_RE = re.compile(r"^\s*-\s*\[( |x|X)\]\s*(.+?)\s*$")
 EXCLUDED_SUBDIRS = frozenset(
     {"Categories", "Digests", "People", "Studies", "Prep", "Attachments"}
 )
+
+
+def is_section_start(line: str, heading: str) -> bool:
+    """Whether `line` opens the named section ('## transcript', lowercase).
+
+    Section detection goes through writer.opens_section so the reader and the
+    writer cannot disagree about what a heading is; see AGENTS.md.
+    """
+    return opens_section(line) and line.strip().lower() == heading
 
 
 def _strip_wikilink(s: str) -> str:
@@ -54,7 +64,7 @@ def _extract_transcript(body: str) -> str:
     """
     lines = body.splitlines()
     start = next(
-        (i for i, ln in enumerate(lines) if ln.strip().lower() == "## transcript"),
+        (i for i, ln in enumerate(lines) if is_section_start(ln, "## transcript")),
         None,
     )
     if start is None:
@@ -78,7 +88,7 @@ def _extract_summary(body: str) -> str:
     out: list[str] = []
     in_section = False
     for ln in lines:
-        if ln.strip().lower() == "## summary":
+        if is_section_start(ln, "## summary"):
             in_section = True
             continue
         if in_section:
@@ -95,7 +105,7 @@ def _extract_action_items(body: str) -> list[tuple[str, bool]]:
     out: list[tuple[str, bool]] = []
     in_section = False
     for ln in lines:
-        if ln.strip().lower() == "## action items":
+        if is_section_start(ln, "## action items"):
             in_section = True
             continue
         if in_section:

@@ -26,18 +26,22 @@ import frontmatter  # noqa: E402
 from transcript_analyzer.config import load_config  # noqa: E402
 from transcript_analyzer.db import canonical_note_path, get_conn, record_sync  # noqa: E402
 from transcript_analyzer.obsidian.writer import _quote_block  # noqa: E402
-from transcript_analyzer.pipeline.indexer import index_note  # noqa: E402
+from transcript_analyzer.pipeline.indexer import (  # noqa: E402
+    _extract_transcript,
+    index_note,
+    is_section_start,
+)
 
 
 def _is_transcript_heading(line: str) -> bool:
     """The same heading rule indexer._extract_transcript matches on.
 
     A stricter rule here would be worse than a no-op: _already_timed reads the
-    transcript through the indexer's lenient rule, so on a hand-edited
-    '## transcript' the two would disagree and a SECOND callout would be
-    appended instead of the existing one being rewritten.
+    transcript through the indexer's rule, so on a hand-edited '## transcript'
+    the two would disagree and a SECOND callout would be appended instead of
+    the existing one being rewritten.
     """
-    return line.strip().lower() == "## transcript"
+    return is_section_start(line, "## transcript")
 
 
 def _section_end(lines: list[str], start: int) -> int:
@@ -114,6 +118,7 @@ def backfill(*, source: str | None, limit: int | None, dry_run: bool, force: boo
             errors += 1
             continue
         native = None
+        ambiguous = 0
         # Prefer sync_state native_id
         with get_conn(cfg.db_path) as conn:
             srow = conn.execute(
@@ -121,14 +126,34 @@ def backfill(*, source: str | None, limit: int | None, dry_run: bool, force: boo
                 (canonical_note_path(note_path),),
             ).fetchone()
             if not srow:
-                # try by matching any sync row that points near this file
-                srow = conn.execute(
-                    "SELECT native_id, source FROM sync_state WHERE note_path LIKE ?",
-                    (f"%{note_path.name}",),
-                ).fetchone()
+                # Fall back to the filename, compared EXACTLY. Matching it as a
+                # LIKE pattern made '_' and '%' wildcards, so a hand-renamed
+                # note could pick up a different recording's native_id and have
+                # someone else's transcript written into it.
+                matches = [
+                    r
+                    for r in conn.execute(
+                        "SELECT native_id, source, note_path FROM sync_state"
+                    ).fetchall()
+                    if r["note_path"] and Path(r["note_path"]).name == note_path.name
+                ]
+                if len(matches) == 1:
+                    srow = matches[0]
+                else:
+                    ambiguous = len(matches)
             if srow:
                 native = srow["native_id"]
                 src = srow["source"] or src
+
+        if ambiguous:
+            # Never guess which recording a note belongs to: a re-run is cheap,
+            # the wrong transcript in the vault is not recoverable.
+            print(
+                f"  · skip {note_path.name}: {ambiguous} sync_state rows share "
+                f"this filename"
+            )
+            skipped += 1
+            continue
 
         if not native:
             print(f"  · skip {note_path.name}: no sync_state native_id")
@@ -136,8 +161,6 @@ def backfill(*, source: str | None, limit: int | None, dry_run: bool, force: boo
             continue
 
         # Peek existing transcript for skip
-        from transcript_analyzer.pipeline.indexer import _extract_transcript
-
         existing = _extract_transcript(post.content)
         if _already_timed(existing) and not force:
             skipped += 1

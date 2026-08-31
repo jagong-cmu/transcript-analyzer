@@ -269,3 +269,153 @@ def test_already_timed_is_not_faked_by_an_owner_callout(cfg):
     )
     assert _extract_transcript(note) == "Angela: untimed original."
     assert not backfill_timestamps._already_timed(_extract_transcript(note))
+
+
+class _FakePocketClient:
+    """Stands in for the network. Records which recording was asked for."""
+
+    fetched: list = []
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+
+    def get_recording(self, rec_id):
+        _FakePocketClient.fetched.append(rec_id)
+        return rec_id
+
+    def to_transcript(self, detail):
+        from datetime import date
+
+        from transcript_analyzer.models import Transcript, TranscriptSegment
+
+        return Transcript(
+            id="fetched",
+            source="pocket",
+            native_id=detail,
+            title="fetched",
+            date=date(2026, 7, 1),
+            text=f"[0:00] transcript of {detail}",
+            segments=[
+                TranscriptSegment(text=f"transcript of {detail}", start_sec=0.0)
+            ],
+        )
+
+    def close(self):
+        pass
+
+
+def _backfill_env(cfg, monkeypatch, note_name: str):
+    """A vault with one untimed pocket note, indexed, and the network stubbed."""
+    from dataclasses import replace
+    from datetime import date
+
+    from transcript_analyzer.connectors import pocket_api
+    from transcript_analyzer.models import Insight, Transcript
+    from transcript_analyzer.obsidian import writer
+    from transcript_analyzer.pipeline.indexer import index_note
+
+    cfg = replace(cfg, pocket=replace(cfg.pocket, api_key="pk_test"))
+    transcript = Transcript(
+        id="bf9",
+        source="pocket",
+        native_id="MINE",
+        title="raw",
+        date=date(2026, 7, 1),
+        text="Angela: untimed original.",
+    )
+    note = writer.write_note(cfg, transcript, Insight(headline="Placeholder"))
+    note = note.rename(note.with_name(note_name))
+    index_note(cfg, note)
+
+    _FakePocketClient.fetched = []
+    monkeypatch.setattr(pocket_api, "PocketClient", _FakePocketClient)
+    monkeypatch.setattr(backfill_timestamps, "load_config", lambda: cfg)
+    return cfg, note
+
+
+def _sync_row(cfg, note_path_value: str, native: str):
+    from datetime import datetime, timezone
+
+    from transcript_analyzer.db import get_conn, record_sync
+
+    with get_conn(cfg.db_path) as conn:
+        record_sync(
+            conn,
+            "pocket",
+            native,
+            "hash",
+            note_path_value,
+            datetime.now(timezone.utc).isoformat(),
+        )
+
+
+def test_a_filename_with_an_underscore_does_not_match_another_recording(
+    cfg, monkeypatch
+):
+    """'_' is a LIKE wildcard, so the fallback lookup matched a DIFFERENT
+    sync_state row and rewrote this note with someone else's transcript."""
+    cfg, note = _backfill_env(cfg, monkeypatch, "2026-07-01 chat_with_angela.md")
+    # Same name to LIKE (the '_' matches '-'), a different note in fact.
+    _sync_row(cfg, str(note.with_name("2026-07-01 chat-with-angela.md")), "OTHER")
+    before = note.read_text(encoding="utf-8")
+
+    summary = backfill_timestamps.backfill(
+        source=None, limit=None, dry_run=False, force=False
+    )
+
+    assert _FakePocketClient.fetched == [], "fetched another note's recording"
+    assert summary["updated"] == 0
+    assert summary["skipped"] == 1
+    assert note.read_text(encoding="utf-8") == before
+
+
+def test_an_ambiguous_filename_match_skips_rather_than_guessing(cfg, monkeypatch):
+    """Two rows share the basename: fetchone() would have picked one at random."""
+    cfg, note = _backfill_env(cfg, monkeypatch, "2026-07-01 chat.md")
+    _sync_row(cfg, f"/somewhere/a/{note.name}", "ONE")
+    _sync_row(cfg, f"/somewhere/b/{note.name}", "TWO")
+    before = note.read_text(encoding="utf-8")
+
+    summary = backfill_timestamps.backfill(
+        source=None, limit=None, dry_run=False, force=False
+    )
+
+    assert _FakePocketClient.fetched == []
+    assert summary["updated"] == 0
+    assert summary["skipped"] == 1
+    assert note.read_text(encoding="utf-8") == before
+
+
+def test_an_unambiguous_filename_match_still_backfills(cfg, monkeypatch):
+    """Failing safe must not stop the migration doing its job."""
+    from transcript_analyzer.db import canonical_note_path
+
+    cfg, note = _backfill_env(cfg, monkeypatch, "2026-07-01 chat_with_angela.md")
+    _sync_row(cfg, canonical_note_path(note), "MINE")
+
+    summary = backfill_timestamps.backfill(
+        source=None, limit=None, dry_run=False, force=False
+    )
+
+    assert _FakePocketClient.fetched == ["MINE"]
+    assert summary["updated"] == 1
+
+    from transcript_analyzer.db import get_conn, get_transcript
+
+    with get_conn(cfg.db_path) as conn:
+        rec = get_transcript(conn, "bf9")
+    assert rec is not None
+    assert rec.transcript_text == "[0:00] transcript of MINE"
+
+
+def test_a_moved_note_is_still_found_by_its_filename(cfg, monkeypatch):
+    """The legacy/symlink case the fallback exists for keeps working."""
+    cfg, note = _backfill_env(cfg, monkeypatch, "2026-07-01 chat.md")
+    _sync_row(cfg, f"/old/vault/location/{note.name}", "MINE")
+
+    summary = backfill_timestamps.backfill(
+        source=None, limit=None, dry_run=False, force=False
+    )
+
+    assert _FakePocketClient.fetched == ["MINE"]
+    assert summary["updated"] == 1

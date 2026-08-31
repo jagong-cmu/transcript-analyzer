@@ -33,8 +33,20 @@ SYNTH_SUBDIRS = ("Digests", "People", "Studies", "Prep", "Categories")
 SYNTH_BEGIN = "<!-- synth:begin — generated; edits inside this block are overwritten -->"
 SYNTH_END = "<!-- synth:end -->"
 
-# A markdown ATX heading: what the indexer treats as the start of a section.
-_HEADING_SHAPE_RE = re.compile(r"[ \t]*#{1,6}(?:\s|$)")
+_ATX_HEADING_RE = re.compile(r"#{1,6}(?:\s|$)")
+
+
+def opens_section(line: str) -> bool:
+    """Whether a body line reads as a section heading when the note is parsed.
+
+    The one definition of that question. The reader finds its sections after
+    `line.strip()`, which drops every kind of Unicode whitespace, so this asks
+    the same way: any writer that decided separately what to escape would let
+    a line it considered ordinary text open a section on the way back in.
+    A line has to be one to six '#' followed by whitespace or nothing else to
+    qualify, so a tag or a rank ('#hiring', '#1 priority') is not a heading.
+    """
+    return bool(_ATX_HEADING_RE.match(line.strip()))
 
 
 def attachments_dir(cfg: Config) -> Path:
@@ -130,17 +142,15 @@ def _one_line(value: str) -> str:
 def _body_text(value: str) -> str:
     """Free text safe to place in the note body, keeping its line structure.
 
-    The indexer finds every section by matching whole body lines ('## Summary',
-    '## Transcript'), so an LLM value whose own line is heading-shaped opens a
-    section the writer never opened: the real transcript stops being what the
-    index, the dashboard and RAG read back. Only a markdown heading — one to
-    six '#' then whitespace — can do that, so only that shape is escaped; a
-    line opening with a tag or a rank ('#hiring', '#1 priority') is left byte
-    for byte as written, because the escape would round-trip into the index.
+    An LLM value whose own line would open a section opens one the writer never
+    opened: the real transcript stops being what the index, the dashboard and
+    RAG read back. Escaped exactly when `opens_section` says so — the same
+    predicate the reader uses — and left byte for byte otherwise, because the
+    escape itself round-trips into the index.
     """
     out: list[str] = []
     for ln in str(value).splitlines() or [""]:
-        if _HEADING_SHAPE_RE.match(ln):
+        if opens_section(ln):
             indent = len(ln) - len(ln.lstrip())
             ln = ln[:indent] + "\\" + ln[indent:]
         out.append(ln)
