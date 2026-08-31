@@ -1,5 +1,4 @@
 import importlib
-import json
 import sys
 from datetime import date
 from pathlib import Path
@@ -83,34 +82,28 @@ APP_MODULE = "transcript_analyzer.web.app"
 
 
 @pytest.fixture
-def app_mod(tmp_path, monkeypatch):
-    """The dashboard imported against a scratch config (never the real vault).
+def app_mod(cfg, monkeypatch):
+    """The dashboard bound to the tmp-vault `cfg` above — vault AND database.
 
-    web/app.py binds `cfg = load_config()` at module scope, so the module has
-    to be dropped from sys.modules and re-imported for each test to actually
-    get its own config instead of the first test's (deleted) tmp_path.
+    web/app.py resolves its config once, at module scope, so the module is
+    dropped from sys.modules and re-imported per test. Pointing
+    TRANSCRIPT_ANALYZER_CONFIG at a scratch toml is not enough on its own:
+    Config.data_dir is a dataclass default (REPO_ROOT/"data") that no toml key
+    can move, so a config loaded from a file still binds — and creates — the
+    developer's real index.db. The isolation therefore comes from handing the
+    module the Config object itself.
     """
-    config = tmp_path / "config.toml"
-    config.write_text(
-        "[vault]\n"
-        f"path = {json.dumps(str(tmp_path / 'vault'))}\n"
-        'name = "Test Vault"\n'
-        'insights_folder = "Transcript Insights"\n'
-        "\n[pocket]\n"
-        'folder = "Pocket AI Recordings"\n'
-        "\n[anthropic]\n"
-        'api_key = "test-key"\n',
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("TRANSCRIPT_ANALYZER_CONFIG", str(config))
+    from transcript_analyzer import config as config_module
 
-    from transcript_analyzer.config import load_config
+    real_load_config = config_module.load_config
+    real_load_config.cache_clear()
+    monkeypatch.setattr(config_module, "load_config", lambda: cfg)
 
-    load_config.cache_clear()
     sys.modules.pop(APP_MODULE, None)
     app_module = importlib.import_module(APP_MODULE)
+    assert app_module.cfg is cfg, "the dashboard did not bind the scratch config"
 
     yield app_module
 
     sys.modules.pop(APP_MODULE, None)
-    load_config.cache_clear()
+    real_load_config.cache_clear()

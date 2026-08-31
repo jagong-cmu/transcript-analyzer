@@ -1,8 +1,15 @@
-"""A note title is LLM/vault free text now, not a slugified filename.
+"""Server-side handling of a note title, which is LLM/vault free text now.
 
-It reaches the dashboard two ways — server-rendered pages, and the /chat/ask
-`sources` event the Ask panel renders — and neither may deliver it as live
-markup.
+SCOPE, precisely: these cover the two things the SERVER controls — that a
+Jinja-rendered page never emits the title as live markup, and that the /ask
+`sources` event hands the title to the client as a JSON data value rather than
+as a markup fragment.
+
+NOT COVERED HERE: the client-side render of that event. _ask_panel.html builds
+its source chips with createElement/textContent, and nothing in this file would
+fail if that were reverted to an innerHTML concatenation — asserting on it needs
+a DOM, i.e. a JS runtime this suite deliberately does not have. Do not read a
+green run here as proof the browser-side sink is safe.
 """
 import json
 from html.parser import HTMLParser
@@ -45,7 +52,7 @@ class _Document(HTMLParser):
         return "".join(self.text)
 
 
-def _index_record(app_cfg, cfg, title: str) -> str:
+def _index_record(cfg, title: str) -> str:
     from transcript_analyzer.models import NoteRecord
 
     rec = NoteRecord(
@@ -68,9 +75,8 @@ def _index_record(app_cfg, cfg, title: str) -> str:
     return rec.transcript_id
 
 
-def test_transcript_page_never_serves_the_title_as_markup(app_mod, cfg, monkeypatch):
-    monkeypatch.setattr(app_mod, "cfg", cfg)
-    tid = _index_record(app_mod.cfg, cfg, NASTY_TITLE)
+def test_jinja_renders_the_title_as_text_on_the_transcript_page(app_mod, cfg):
+    tid = _index_record(cfg, NASTY_TITLE)
 
     with TestClient(app_mod.app) as client:
         r = client.get(f"/transcript/{tid}")
@@ -83,9 +89,8 @@ def test_transcript_page_never_serves_the_title_as_markup(app_mod, cfg, monkeypa
     assert NASTY_TITLE in doc.all_text()
 
 
-def test_browse_page_never_serves_the_title_as_markup(app_mod, cfg, monkeypatch):
-    monkeypatch.setattr(app_mod, "cfg", cfg)
-    _index_record(app_mod.cfg, cfg, NASTY_TITLE)
+def test_jinja_renders_the_title_as_text_on_the_browse_page(app_mod, cfg):
+    _index_record(cfg, NASTY_TITLE)
 
     with TestClient(app_mod.app) as client:
         r = client.get("/browse")
@@ -96,11 +101,10 @@ def test_browse_page_never_serves_the_title_as_markup(app_mod, cfg, monkeypatch)
     assert NASTY_TITLE in doc.all_text()
 
 
-def test_ask_sources_event_carries_the_title_as_data(app_mod, cfg, monkeypatch):
-    """The Ask panel builds its chips from this payload. It has to arrive as a
-    JSON string value that round-trips exactly — not as a markup fragment the
-    server has pre-rendered."""
-    monkeypatch.setattr(app_mod, "cfg", cfg)
+def test_ask_sources_event_carries_the_title_as_json_data(app_mod, cfg, monkeypatch):
+    """The server hands the Ask panel data, not markup: the title arrives as a
+    JSON string value that round-trips exactly. What the panel then DOES with
+    it is the uncovered client-side half described in the module docstring."""
 
     def fake_stream_events(question, **kwargs):
         yield ("sources", [{"n": 1, "title": NASTY_TITLE, "id": "xss1", "note_path": ""}])

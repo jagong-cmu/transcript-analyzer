@@ -29,7 +29,11 @@ from slugify import slugify  # noqa: E402
 from transcript_analyzer.config import load_config  # noqa: E402
 from transcript_analyzer.db import canonical_note_path, get_conn  # noqa: E402
 from transcript_analyzer.obsidian import writer  # noqa: E402
-from transcript_analyzer.pipeline.indexer import reindex_all  # noqa: E402
+from transcript_analyzer.pipeline.indexer import (  # noqa: E402
+    _extract_h1,
+    _extract_summary,
+    reindex_all,
+)
 from transcript_analyzer.pipeline.llm import LLM  # noqa: E402
 from transcript_analyzer.titles import (  # noqa: E402
     clean_headline,
@@ -53,28 +57,6 @@ HEADLINE_SCHEMA = {
 HEADLINE_SYSTEM = """You write short, specific titles for meeting transcripts.
 Return JSON only. No dates in the title. Prefer concrete topics and people
 over generic words like Meeting, Sync, or Call."""
-
-
-def _extract_summary(body: str) -> str:
-    lines = body.splitlines()
-    out: list[str] = []
-    in_section = False
-    for ln in lines:
-        if ln.strip().lower() == "## summary":
-            in_section = True
-            continue
-        if in_section:
-            if ln.startswith("## "):
-                break
-            out.append(ln)
-    return "\n".join(out).strip()
-
-
-def _extract_h1(body: str) -> str:
-    for ln in body.splitlines():
-        if ln.startswith("# "):
-            return ln[2:].strip()
-    return ""
 
 
 def _set_h1(body: str, title: str) -> str:

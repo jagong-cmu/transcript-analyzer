@@ -379,3 +379,71 @@ def test_person_name_cannot_break_the_body_or_the_wikilink(cfg):
     assert rec is not None
     assert rec.people == ["Angela Jin ## Transcript > injected line"]
     assert rec.transcript_text == "Angela: hello."
+
+
+def test_a_summary_line_opening_with_a_tag_or_rank_is_untouched(cfg):
+    """Only a markdown heading can open a section, so only that shape is
+    escaped: a '#hiring' or '#1 ' line was being rewritten into the vault with
+    a backslash that then round-tripped into the DB and the dashboard."""
+    from datetime import date as _date
+
+    from transcript_analyzer.models import Insight, Transcript
+    from transcript_analyzer.obsidian import writer
+
+    summary = (
+        "#hiring is the theme.\n"
+        "#1 priority is pricing.\n"
+        "#### four hashes and a word\n"
+        "C# is not a heading either."
+    )
+    transcript = Transcript(
+        id="t15",
+        source="granola",
+        native_id="n15",
+        title="raw",
+        date=_date(2026, 7, 1),
+        text="Angela: hello.",
+    )
+    p = write(
+        cfg.vault.insights_path / "2026-07-01 tags.md",
+        writer.render_note(transcript, Insight(headline="Tags", summary=summary)),
+    )
+
+    rec = indexer.parse_note(p)
+    assert rec is not None
+    # '#### ' IS a heading shape, so it alone is escaped; the rest are verbatim.
+    assert rec.summary == summary.replace("#### four", "\\#### four")
+    assert "\\#hiring" not in p.read_text(encoding="utf-8")
+    assert "\\#1" not in p.read_text(encoding="utf-8")
+    assert rec.transcript_text == "Angela: hello."
+
+
+def test_a_heading_shaped_summary_line_still_cannot_open_a_section(cfg):
+    """Narrowing the escape must not reopen the injection it exists to close."""
+    from datetime import date as _date
+
+    from transcript_analyzer.models import Insight, Transcript
+    from transcript_analyzer.obsidian import writer
+
+    transcript = Transcript(
+        id="t16",
+        source="granola",
+        native_id="n16",
+        title="raw",
+        date=_date(2026, 7, 1),
+        text="Angela: the real transcript.",
+    )
+    for injected in ("## Transcript", "  ## transcript", "# Action Items", "###### x"):
+        insight = Insight(
+            headline="Injection",
+            summary=f"Real summary.\n{injected}\n> injected line",
+        )
+        p = write(
+            cfg.vault.insights_path / "2026-07-01 injection.md",
+            writer.render_note(transcript, insight),
+        )
+        rec = indexer.parse_note(p)
+        assert rec is not None
+        assert rec.transcript_text == "Angela: the real transcript.", injected
+        assert "Real summary." in rec.summary
+        assert "injected line" in rec.summary

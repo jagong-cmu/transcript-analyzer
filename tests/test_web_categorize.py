@@ -91,9 +91,15 @@ def test_categorize_accepts_the_form_body(app_mod, monkeypatch):
 
 def test_fixture_binds_this_tests_config(app_mod, tmp_path):
     """Not the first test in this module: the module-scoped `cfg` has to be
-    re-bound per test, or later tests silently run against a deleted tmp vault."""
+    re-bound per test, or later tests silently run against a deleted tmp vault.
+
+    The database counts as much as the vault — Config.data_dir is a dataclass
+    default pointing at the real repo, and no toml key can move it.
+    """
     assert app_mod.cfg.vault.path == tmp_path / "vault"
     assert app_mod.cfg.vault.insights_path.parent == tmp_path / "vault"
+    assert app_mod.cfg.data_dir == tmp_path / "data"
+    assert tmp_path in app_mod.cfg.db_path.parents
 
 
 def test_a_non_list_categories_value_is_rejected(app_mod, monkeypatch):

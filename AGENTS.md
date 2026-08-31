@@ -22,6 +22,16 @@ against a scratch vault instead of the real one.
   `pipeline/indexer.py:parse_note` fails soft on such a note (logs a warning, skips that note
   alone) so one bad note no longer aborts `reindex_all`, but the note is still missing. Watch
   for the warning rather than assuming a note is indexed.
+- **The note BODY is parsed back too, so it is an interface, not formatting.** Free text
+  written into it must go through `writer._one_line` (list items, which the indexer prefers
+  over the frontmatter list) or `writer._body_text` (the summary, where a heading-shaped line
+  would open a section the writer never opened). And the `## Transcript` section has exactly
+  one grammar — heading, optional blank run, contiguous `>` run — that `writer._quote_block`,
+  `indexer._extract_transcript` and `scripts/backfill_timestamps.py` (`_is_transcript_heading`
+  + `_section_end`) must all agree on: change one and change all three. A transcript's own
+  blank line is emitted as `> `, which is what makes a truly blank line an unambiguous end of
+  the callout. Disagreement here silently duplicates a transcript, or splices away whatever
+  the vault owner appended below it.
 - Scripts under `scripts/` write to the *live* vault and call the Pocket/Granola/Anthropic
   APIs. Use `--dry-run`/`--limit` when exercising them.
 

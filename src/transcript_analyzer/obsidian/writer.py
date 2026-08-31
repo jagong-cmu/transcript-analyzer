@@ -13,6 +13,7 @@ Each note's H1 / indexed title is ``{headline}, July 26th, 2026``.
 """
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from pathlib import Path
 
@@ -31,6 +32,9 @@ SYNTH_SUBDIRS = ("Digests", "People", "Studies", "Prep", "Categories")
 
 SYNTH_BEGIN = "<!-- synth:begin — generated; edits inside this block are overwritten -->"
 SYNTH_END = "<!-- synth:end -->"
+
+# A markdown ATX heading: what the indexer treats as the start of a section.
+_HEADING_SHAPE_RE = re.compile(r"[ \t]*#{1,6}(?:\s|$)")
 
 
 def attachments_dir(cfg: Config) -> Path:
@@ -129,14 +133,16 @@ def _body_text(value: str) -> str:
     The indexer finds every section by matching whole body lines ('## Summary',
     '## Transcript'), so an LLM value whose own line is heading-shaped opens a
     section the writer never opened: the real transcript stops being what the
-    index, the dashboard and RAG read back. Escaping the leading '#' run leaves
-    an ordinary value byte-identical and renders as a literal '#' in Obsidian.
+    index, the dashboard and RAG read back. Only a markdown heading — one to
+    six '#' then whitespace — can do that, so only that shape is escaped; a
+    line opening with a tag or a rank ('#hiring', '#1 priority') is left byte
+    for byte as written, because the escape would round-trip into the index.
     """
     out: list[str] = []
     for ln in str(value).splitlines() or [""]:
-        stripped = ln.lstrip()
-        if stripped.startswith("#"):
-            ln = ln[: len(ln) - len(stripped)] + "\\" + stripped
+        if _HEADING_SHAPE_RE.match(ln):
+            indent = len(ln) - len(ln.lstrip())
+            ln = ln[:indent] + "\\" + ln[indent:]
         out.append(ln)
     return "\n".join(out)
 
