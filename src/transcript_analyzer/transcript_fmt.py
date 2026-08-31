@@ -45,8 +45,19 @@ def parse_timestamp_prefix(line: str) -> tuple[Optional[float], str]:
     return float(h * 3600 + mm * 60 + ss), rest
 
 
-def coerce_seconds(value) -> Optional[float]:
-    """Normalize API timing fields to seconds. Values ≥ 10_000 treated as ms."""
+# Neither Pocket nor Granola declares the unit of its timing fields, so it is
+# inferred: anything at or past this mark is milliseconds. The inference is made
+# once per transcript (see coerce_seconds_series) rather than per value —
+# per-value it would read the first 2h46m of a long recording as seconds and
+# everything after it as milliseconds, collapsing the tail to a few seconds and
+# breaking the ordering mid-transcript. A recording genuinely longer than
+# MS_THRESHOLD seconds (~2h46m) reported in seconds is still misread; the source
+# APIs give nothing better to disambiguate on.
+MS_THRESHOLD = 10_000
+
+
+def _as_number(value) -> Optional[float]:
+    """Parse a raw timing field to a non-negative number, unit unresolved."""
     if value is None or value == "":
         return None
     try:
@@ -60,11 +71,33 @@ def coerce_seconds(value) -> Optional[float]:
             num = float(value)
     except (TypeError, ValueError):
         return None
-    if num < 0:
+    if num < 0 or num != num:  # negative or NaN
         return None
-    if num >= 10_000:
-        return num / 1000.0
     return num
+
+
+def coerce_seconds(value) -> Optional[float]:
+    """Normalize one API timing field to seconds. Values ≥ 10_000 treated as ms.
+
+    Prefer coerce_seconds_series when normalizing a whole transcript, so every
+    segment in it resolves against the same unit.
+    """
+    num = _as_number(value)
+    if num is None:
+        return None
+    return num / 1000.0 if num >= MS_THRESHOLD else num
+
+
+def coerce_seconds_series(values: Iterable) -> list[Optional[float]]:
+    """Normalize a transcript's timing fields, picking the unit once for all.
+
+    If any value in the series looks like milliseconds, the whole series is
+    milliseconds — that keeps a single transcript internally consistent and
+    monotonic even when it runs past the ambiguity threshold.
+    """
+    nums = [_as_number(v) for v in values]
+    div = 1000.0 if any(n is not None and n >= MS_THRESHOLD for n in nums) else 1.0
+    return [None if n is None else n / div for n in nums]
 
 
 def iso_to_epoch(value) -> Optional[float]:

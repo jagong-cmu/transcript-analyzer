@@ -93,3 +93,52 @@ def test_relative_seconds_helper():
     assert rel[0] == 0.0
     assert rel[1] == 60.0
     assert rel[2] is None
+
+
+def test_unit_inference_is_per_transcript_not_per_value():
+    """One unit for the whole recording, even across the ambiguity threshold.
+
+    Per-value inference read everything under 10_000 as seconds and everything
+    over it as milliseconds, so a recording that ran past ~2h46m jumped
+    backwards mid-transcript. Absolute scale stays ambiguous for a long
+    seconds-valued recording (nothing in the API distinguishes it from a short
+    ms-valued one), but the ordering must survive.
+    """
+    detail = {
+        "transcript": {
+            "segments": [
+                {"text": "start", "start": 0, "end": 5},
+                {"text": "middle", "start": 9990, "end": 9995},
+                {"text": "late", "start": 10800, "end": 10805},
+            ]
+        }
+    }
+    starts = [s.start_sec for s in PocketClient._transcript_segments(detail)]
+    assert starts == sorted(starts), starts
+    # A single divisor for all three, not one boundary inside the transcript.
+    assert starts == [0.0, 9.99, 10.8]
+
+
+def test_millisecond_transcript_scales_every_segment():
+    detail = {
+        "transcript": {
+            "segments": [
+                {"text": "a", "start": 500, "end": 1500},
+                {"text": "b", "start": 15000, "end": 16000},
+            ]
+        }
+    }
+    segs = PocketClient._transcript_segments(detail)
+    assert [s.start_sec for s in segs] == [0.5, 15.0]
+
+
+def test_granola_leading_silent_segment_still_anchors_zero():
+    detail = {
+        "transcript": [
+            {"text": "  ", "start_time": "2026-07-01T12:00:00Z"},
+            {"text": "Hi", "start_time": "2026-07-01T12:00:10Z"},
+        ]
+    }
+    segs = GranolaClient._transcript_segments(detail)
+    assert [s.text for s in segs] == ["Hi"]
+    assert segs[0].start_sec == 10.0

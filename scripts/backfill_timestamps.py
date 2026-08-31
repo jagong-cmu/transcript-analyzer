@@ -32,9 +32,12 @@ from transcript_analyzer.pipeline.indexer import index_note  # noqa: E402
 def _replace_transcript_section(content: str, timed_text: str) -> str:
     block = "## Transcript\n" + _quote_block(timed_text) + "\n"
     if re.search(r"^## Transcript\s*$", content, re.MULTILINE):
+        # Transcript text is arbitrary content, so it must never be used as a
+        # re.sub template — a stray backslash raises "bad escape" (or worse,
+        # silently expands a group reference). A function replacement is literal.
         return re.sub(
             r"^## Transcript\s*\n.*",
-            block.rstrip() + "\n",
+            lambda _m: block.rstrip() + "\n",
             content,
             count=1,
             flags=re.MULTILINE | re.DOTALL,

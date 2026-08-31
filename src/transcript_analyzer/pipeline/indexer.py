@@ -140,7 +140,7 @@ def parse_note(path: Path) -> Optional[NoteRecord]:
         headline = clean_headline(_extract_h1(post.content)) or headline_from_summary(
             summary, fallback=path.stem
         )
-    display_title = compose_display_title(headline, date_str) if date_str else headline
+    display_title = _display_title(headline, date_str)
 
     return NoteRecord(
         transcript_id=str(tid),
@@ -157,6 +157,19 @@ def parse_note(path: Path) -> Optional[NoteRecord]:
         note_path=str(path.resolve()),
         transcript_text=_extract_transcript(post.content),
     )
+
+
+def _display_title(headline: str, date_str: str) -> str:
+    """Compose "{headline}, July 26th, 2026", tolerating a junk `date:`.
+
+    A note with a missing or malformed date must still index: parse_note is
+    called in a bare loop by reindex_all, so raising here would take the whole
+    vault index down over one bad note.
+    """
+    try:
+        return compose_display_title(headline, date_str) if date_str else headline
+    except ValueError:
+        return headline
 
 
 def _extract_h1(body: str) -> str:

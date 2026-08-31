@@ -1,6 +1,9 @@
 # Secrets & local config
 config.toml
 
+# Agent tooling: local settings and nested worktrees
+.claude/
+
 # Python
 __pycache__/
 *.py[cod]

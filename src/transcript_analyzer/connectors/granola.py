@@ -175,32 +175,33 @@ class GranolaClient:
     @classmethod
     def _transcript_segments(cls, detail: dict) -> list:
         from ..models import TranscriptSegment
-        from ..transcript_fmt import relative_seconds_from_iso
+        from ..transcript_fmt import coerce_seconds_series, relative_seconds_from_iso
 
+        # Every segment dict, empty ones included: a leading silent segment
+        # still marks t=0 for the ISO → relative conversion below.
         raw = [seg for seg in (detail.get("transcript") or []) if isinstance(seg, dict)]
         owner, other = cls._channel_labels(detail)
         starts = [seg.get("start_time") or seg.get("start") for seg in raw]
-        # Prefer ISO wall-clock → relative; else numeric start fields.
+        ends = [seg.get("end_time") or seg.get("end") for seg in raw]
+        # Prefer ISO wall-clock → relative; else numeric start fields, whose
+        # unit is resolved once across the note rather than per value.
         rel = relative_seconds_from_iso(
             [s if isinstance(s, str) else None for s in starts]
         )
-        from ..transcript_fmt import coerce_seconds
+        timings = coerce_seconds_series(starts + ends)
+        num_starts, num_ends = timings[: len(raw)], timings[len(raw):]
 
         segments: list[TranscriptSegment] = []
         for i, seg in enumerate(raw):
             text = (seg.get("text") or "").strip()
             if not text:
                 continue
-            start = rel[i]
-            if start is None:
-                start = coerce_seconds(seg.get("start_time") or seg.get("start"))
-            end = coerce_seconds(seg.get("end_time") or seg.get("end"))
             segments.append(
                 TranscriptSegment(
                     text=text,
                     speaker=cls._seg_label(seg, owner, other),
-                    start_sec=start,
-                    end_sec=end,
+                    start_sec=rel[i] if rel[i] is not None else num_starts[i],
+                    end_sec=num_ends[i],
                 )
             )
         return segments

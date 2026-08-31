@@ -107,3 +107,58 @@ def test_reindex_all_populates_db(cfg):
     assert len(recs) == 1
     assert recs[0].open_action_items == ["Review the deck"]
     assert recs[0].attendees[0].email == "angela@example.com"
+
+
+def test_note_with_missing_date_still_indexes(cfg):
+    """One note with a junk `date:` must not take the whole reindex down."""
+    write(cfg.vault.insights_path / "2026-07-01 chat.md", NOTE)
+    write(
+        cfg.vault.insights_path / "undated.md",
+        NOTE.replace("date: 2026-07-01\n", "").replace("abc123", "def456"),
+    )
+    assert indexer.reindex_all(cfg) == 2
+
+    p = write(
+        cfg.vault.insights_path / "bad-date.md",
+        NOTE.replace("date: 2026-07-01", "date: whenever").replace("abc123", "ghi789"),
+    )
+    rec = indexer.parse_note(p)
+    assert rec is not None
+    # Falls back to the bare headline rather than raising on the bad date.
+    assert rec.title == "Chat with Angela"
+
+
+def test_writer_frontmatter_survives_backslashes_and_quotes(cfg):
+    """An LLM headline with a backslash used to make the note unparseable —
+    and parse_note swallows load errors, so the note vanished from the index."""
+    from datetime import date as _date
+
+    from transcript_analyzer.models import Attendee, Insight, Transcript
+    from transcript_analyzer.obsidian import writer
+
+    nasty = 'Migrating C:\\Users\\ops to the "new" share'
+    transcript = Transcript(
+        id="t9",
+        source="granola",
+        native_id="n9",
+        title="raw",
+        date=_date(2026, 7, 1),
+        attendees=[Attendee(name=nasty, email="ops@example.com")],
+        text="Ops: moving the share.",
+    )
+    insight = Insight(
+        headline=nasty,
+        summary="Moving the share.",
+        topics=[nasty],
+        action_items=[nasty],
+        people=["Ops"],
+    )
+    p = write(
+        cfg.vault.insights_path / "2026-07-01 migrating.md",
+        writer.render_note(transcript, insight),
+    )
+    rec = indexer.parse_note(p)
+    assert rec is not None, "note was dropped from the index"
+    assert rec.title == f"{nasty}, July 1st, 2026"
+    assert rec.topics == [nasty]
+    assert rec.attendees[0].name == nasty

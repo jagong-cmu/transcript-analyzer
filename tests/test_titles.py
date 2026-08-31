@@ -44,3 +44,22 @@ def test_headline_from_summary():
         headline_from_summary("The conversation was about networking tips for founders.")
         == "Networking tips for founders"
     )
+
+
+def test_compose_display_title_rejects_a_junk_date():
+    import pytest
+
+    with pytest.raises(ValueError):
+        compose_display_title("Headline", "None")
+
+
+def test_headline_from_summary_edge_cases():
+    # No summary and no fallback still yields a usable title.
+    assert headline_from_summary("") == "Untitled conversation"
+    assert headline_from_summary("", fallback="2026-07-01 some-note") == "some-note"
+    # A long single sentence is truncated on a word boundary with an ellipsis.
+    long = headline_from_summary("word " * 60)
+    assert len(long) <= 91 and long.endswith("…")
+    # Re-composing an already-composed title does not stack date suffixes.
+    once = compose_display_title("Pricing deck review", date(2026, 7, 26))
+    assert compose_display_title(once, date(2026, 7, 26)) == once

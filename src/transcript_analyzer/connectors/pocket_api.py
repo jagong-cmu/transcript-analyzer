@@ -144,10 +144,17 @@ class PocketClient:
     @classmethod
     def _transcript_segments(cls, detail: dict) -> list:
         from ..models import TranscriptSegment
-        from ..transcript_fmt import coerce_seconds, format_segments
+        from ..transcript_fmt import coerce_seconds_series
+
+        raw = list(cls._iter_raw_segments(detail))
+        # Resolve the timing unit once across the whole recording, not per value.
+        timings = coerce_seconds_series(
+            [seg.get("start") for seg in raw] + [seg.get("end") for seg in raw]
+        )
+        starts, ends = timings[: len(raw)], timings[len(raw):]
 
         segments: list[TranscriptSegment] = []
-        for seg in cls._iter_raw_segments(detail):
+        for i, seg in enumerate(raw):
             t = (seg.get("text") or "").strip()
             if not t:
                 continue
@@ -155,8 +162,8 @@ class PocketClient:
                 TranscriptSegment(
                     text=t,
                     speaker=cls._speaker_label(seg.get("speaker")),
-                    start_sec=coerce_seconds(seg.get("start")),
-                    end_sec=coerce_seconds(seg.get("end")),
+                    start_sec=starts[i],
+                    end_sec=ends[i],
                 )
             )
         return segments

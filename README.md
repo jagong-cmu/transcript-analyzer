@@ -120,6 +120,25 @@ briefing (themes + open threads) per category, and writes non-destructive
 Category notes under `Transcript Insights/Categories/`. Re-run anytime with a
 different list; `--reset` clears it. The Browse page has the same UI.
 
+### Migrating a vault written before titles + timestamps
+
+Both are one-shot; each supports `--dry-run` and `--limit` so you can check a
+handful first, and both are safe to re-run: `retitle_notes.py` keeps a headline
+a note already has, and `backfill_timestamps.py` skips a transcript that already
+carries `[M:SS]` lines. `--force` overrides either.
+
+```bash
+# Retitle existing notes. Uses Claude by default; --cheap derives the headline
+# from the note's summary with no API calls. Renames files + matching audio.
+./.venv/bin/python scripts/retitle_notes.py --limit 5 --dry-run
+./.venv/bin/python scripts/retitle_notes.py
+
+# Re-fetch timed segments from Pocket/Granola and rewrite the ## Transcript
+# section in place. No insight LLM calls.
+./.venv/bin/python scripts/backfill_timestamps.py --source pocket --dry-run
+./.venv/bin/python scripts/backfill_timestamps.py
+```
+
 ### Background automation (launchd)
 
 ```bash

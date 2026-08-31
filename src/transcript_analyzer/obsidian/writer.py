@@ -52,6 +52,14 @@ def _wikilink(name: str) -> str:
     return f"[[{name}]]"
 
 
+def _yaml_str(value: str) -> str:
+    """A YAML double-quoted scalar. Backslashes must be escaped first: inside
+    double quotes YAML reads ``\\`` as an escape, so an un-escaped one from an
+    LLM headline or transcript makes the whole note unparseable — and the
+    indexer silently drops notes whose frontmatter won't load."""
+    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 def _quote_block(text: str) -> str:
     """Render text inside a collapsible Obsidian callout so the indexer can read it."""
     lines = ["> [!note]- Full transcript"]
@@ -97,28 +105,27 @@ def render_note(transcript: Transcript, insight: Insight, audio_name: str | None
     people_links = [_wikilink(p) for p in insight.people]
     headline = note_headline(transcript, insight)
     display_title = compose_display_title(headline, transcript.date)
-    safe_headline = headline.replace('"', "'")
 
     fm_lines = ["---"]
     fm_lines.append(f"source: {transcript.source}")
     fm_lines.append(f"date: {transcript.date.isoformat()}")
     fm_lines.append(f"transcript_id: {transcript.id}")
-    fm_lines.append(f'headline: "{safe_headline}"')
+    fm_lines.append(f"headline: {_yaml_str(headline)}")
     fm_lines.append("people:")
     for p in people_links:
-        fm_lines.append(f'  - "{p}"')
+        fm_lines.append(f"  - {_yaml_str(p)}")
     if transcript.attendees:
         # The email is the stable person-identity key — persist it.
         fm_lines.append("attendees:")
         for a in transcript.attendees:
-            fm_lines.append(f'  - name: "{a.name.replace(chr(34), chr(39))}"')
-            fm_lines.append(f'    email: "{a.email}"')
+            fm_lines.append(f"  - name: {_yaml_str(a.name)}")
+            fm_lines.append(f"    email: {_yaml_str(a.email)}")
     fm_lines.append("topics:")
     for t in insight.topics:
-        fm_lines.append(f'  - "{t}"')
+        fm_lines.append(f"  - {_yaml_str(t)}")
     fm_lines.append("action_items:")
     for a in insight.action_items:
-        fm_lines.append(f'  - "{a.replace(chr(34), chr(39))}"')
+        fm_lines.append(f"  - {_yaml_str(a)}")
     if insight.sentiment:
         fm_lines.append(f"sentiment: {insight.sentiment}")
     fm_lines.append("---")
