@@ -5,6 +5,7 @@ changes left the old mp3 orphaned in Attachments/ — and, worse, the new stem
 did not exist, so download_audio's "already downloaded" short-circuit missed
 and the whole recording was fetched again.
 """
+import logging
 from dataclasses import replace
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -203,3 +204,100 @@ def test_resync_still_removes_a_genuinely_renamed_note(cfg, tmp_path, monkeypatc
     assert Path(result["note_path"]).exists()
     assert Path(result["note_path"]).name != old_note.name
     assert not old_note.exists()
+
+
+def _other_transcript() -> Transcript:
+    """A DIFFERENT recording on the same date whose headline slugifies alike."""
+    return Transcript(
+        id="t2",
+        source="pocket",
+        native_id="n2",
+        title="Another raw title",
+        date=date(2026, 7, 1),
+        text="Ben: the other recording entirely.",
+    )
+
+
+def test_resync_never_deletes_a_note_it_cannot_prove_is_its_own(cfg, monkeypatch, caplog):
+    """sync_state remembers a PATH, not a claim on the file living there.
+
+    The owner deletes A's note; a later transcript B whose headline slugifies
+    the same way legitimately takes that filename; A re-syncs under a re-worded
+    headline. Acting on the remembered path alone moved B's recording onto A's
+    new stem and then deleted B's note — unrecoverably, since sync is
+    hash-idempotent and never revisits B.
+    """
+    cfg = _pocket_cfg(cfg)
+    a = _transcript()
+    shared_headline = "Pricing deck review with Angela"
+    a_note, a_audio = _seed_previous_note(cfg, a, shared_headline)
+
+    a_note.unlink()  # the vault owner deletes it in Obsidian
+
+    b = _other_transcript()
+    b_note = writer.write_note(cfg, b, Insight(headline=shared_headline, summary="B."))
+    assert b_note == a_note, "B did not take the filename A used to hold"
+    b_audio = writer.audio_path_for(cfg, b_note)
+    b_audio.write_bytes(b"B-recording-bytes")
+    b_bytes = b_note.read_bytes()
+
+    monkeypatch.setattr(
+        sync,
+        "extract_insight",
+        lambda *args, **kwargs: Insight(headline="Q4 pricing follow-up", summary="A."),
+    )
+    from transcript_analyzer.connectors import pocket_api
+
+    monkeypatch.setattr(pocket_api.PocketClient, "audio_url", lambda self, rec_id: "")
+
+    with caplog.at_level(logging.WARNING, logger="transcript_analyzer.sync"):
+        result = sync.process_transcript(cfg, a, llm=None)
+
+    assert b_note.exists(), "another recording's note was deleted"
+    assert b_note.read_bytes() == b_bytes
+    assert b_audio.exists() and b_audio.read_bytes() == b"B-recording-bytes", (
+        "another recording's mp3 was moved onto this transcript's stem"
+    )
+    assert str(b_note) in caplog.text, "the skipped path was not named to the operator"
+
+    # A still gets its own note, under its own name.
+    new_note = Path(result["note_path"])
+    assert new_note.exists() and new_note != b_note
+    assert a_audio == b_audio  # A's old stem is the one B now owns
+
+
+def test_resync_leaves_an_unreadable_previous_note_alone(cfg, monkeypatch, caplog):
+    """Unproven for ANY reason — including a read that fails — means not ours."""
+    transcript = _granola_transcript()
+    old_note = writer.write_note(cfg, transcript, Insight(headline="Old headline"))
+    with get_conn(cfg.db_path) as conn:
+        record_sync(
+            conn,
+            transcript.source,
+            transcript.native_id,
+            "oldhash",
+            str(old_note.resolve()),
+            datetime.now(timezone.utc).isoformat(),
+        )
+    before = old_note.read_bytes()
+
+    real_read_text = Path.read_text
+
+    def denied(self, *args, **kwargs):
+        if Path(self) == old_note:
+            raise PermissionError(13, "Permission denied")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", denied)
+    monkeypatch.setattr(
+        sync,
+        "extract_insight",
+        lambda *args, **kwargs: Insight(headline="Brand new headline", summary="S."),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="transcript_analyzer.sync"):
+        result = sync.process_transcript(cfg, transcript, llm=None)
+
+    assert old_note.exists() and old_note.read_bytes() == before
+    assert Path(result["note_path"]) != old_note
+    assert str(old_note) in caplog.text

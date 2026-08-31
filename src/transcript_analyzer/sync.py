@@ -9,6 +9,7 @@ own daily cadence guard.
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
 from datetime import datetime, timezone
@@ -33,6 +34,8 @@ from .pipeline.insights import extract_insight
 from .pipeline.llm import LLM, LLMBudgetError, LLMKillSwitchError
 from .pipeline.quality import junk_reason
 from .titles import compose_display_title
+
+_log = logging.getLogger(__name__)
 
 FAILURE_COUNTER_KEY = "insight_failures_total"
 
@@ -91,14 +94,44 @@ def _maybe_download_audio(cfg: Config, transcript: Transcript, note_path: Path) 
     return dest.name if got else None
 
 
-def _is_stale_note(prev_path: str, note_path: Path) -> bool:
-    """Whether `prev_path` is provably a DIFFERENT file from the note just written.
+def _owned_prev_note(prev_path: Optional[str], transcript: Transcript) -> Optional[Path]:
+    """The note sync_state remembers for this transcript, only when it is OURS.
 
-    The vault has no backup, so this fails safe: a path that cannot be shown to
-    be another file — a relative or symlinked vault path spelling the same note
-    two ways, or a path that cannot be stat'ed — is never deleted.
+    sync_state stores a path, not a claim on the file living there: the vault
+    owner can delete a note and a later transcript whose headline slugifies the
+    same way then legitimately takes that filename. Acting on the remembered
+    path alone moves that stranger's recording and deletes their note. So the
+    same proof the write and rename targets require — `writer.owns_note`, the
+    one definition — gates the destructive paths here, and a path we cannot
+    prove is ours is left alone and named in a warning: an orphan costs a
+    manual cleanup, a wrong delete costs data this vault cannot recover.
     """
+    if not prev_path:
+        return None
     prev = Path(prev_path)
+    if writer.owns_note(prev, transcript.id):
+        return prev
+    if prev.exists():
+        _log.warning(
+            "not touching %s: sync_state records it for %s/%s, but its "
+            "transcript_id does not prove it is that transcript's note "
+            "(it may now belong to another recording, or to you)",
+            prev, transcript.source, transcript.native_id,
+        )
+    return None
+
+
+def _is_stale_note(prev: Path, note_path: Path, transcript_id: str) -> bool:
+    """Whether `prev` is our own note AND provably a DIFFERENT file from the
+    note just written.
+
+    The vault has no backup, so this fails safe twice over: a file we cannot
+    prove belongs to this transcript is never deleted, and neither is a path
+    that cannot be shown to be another file — a relative or symlinked vault
+    path spelling the same note two ways, or a path that cannot be stat'ed.
+    """
+    if not writer.owns_note(prev, transcript_id):
+        return False
     try:
         if not prev.exists() or prev.samefile(note_path):
             return False
@@ -143,9 +176,10 @@ def process_transcript(
 
     # A re-worded headline renames the note; carry its recording across first,
     # so the download below finds the file the vault already has.
+    prev_note = _owned_prev_note(prev_path, transcript)
     prospective = writer.note_path_for(cfg, transcript, insight)
-    if prev_path and canonical_note_path(prev_path) != canonical_note_path(prospective):
-        writer.move_audio_with_note(cfg, Path(prev_path), prospective)
+    if prev_note and canonical_note_path(prev_note) != canonical_note_path(prospective):
+        writer.move_audio_with_note(cfg, prev_note, prospective)
 
     # Download the recording's audio into the vault (Pocket only) and embed it.
     audio_name = _maybe_download_audio(cfg, transcript, prospective)
@@ -153,9 +187,9 @@ def process_transcript(
     note_path = writer.write_note(cfg, transcript, insight, audio_name=audio_name)
     result["note_path"] = str(note_path)
 
-    if prev_path and _is_stale_note(prev_path, note_path):
+    if prev_note and _is_stale_note(prev_note, note_path, transcript.id):
         try:
-            os.remove(prev_path)
+            os.remove(prev_note)
         except OSError:
             pass
 
