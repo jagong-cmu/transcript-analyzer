@@ -42,6 +42,26 @@ def audio_path_for(cfg: Config, note_path: Path) -> Path:
     return attachments_dir(cfg) / f"{note_path.stem}.mp3"
 
 
+def move_audio_with_note(cfg: Config, old_note: Path, new_note: Path) -> Path | None:
+    """Make a note's recording follow it when the note's filename changes.
+
+    Audio is keyed on the note stem, and the stem is derived from the LLM
+    headline — so any reprocessing that re-words the headline renames the note.
+    Left behind, the old mp3 is orphaned in Attachments/ AND the new stem does
+    not exist, so a re-download is paid for a recording the vault already has.
+    Returns the new audio path if something was moved.
+    """
+    old_audio = audio_path_for(cfg, old_note)
+    new_audio = audio_path_for(cfg, new_note)
+    if old_audio.resolve() == new_audio.resolve() or not old_audio.exists():
+        return None
+    new_audio.parent.mkdir(parents=True, exist_ok=True)
+    if new_audio.exists():
+        new_audio.unlink()
+    old_audio.rename(new_audio)
+    return new_audio
+
+
 def _safe_filename(headline: str, when: str) -> str:
     slug = slugify(headline, max_length=80) or "untitled"
     return f"{when} {slug}.md"
@@ -83,6 +103,24 @@ def _yaml_str(value: str) -> str:
         else:
             out.append(ch)
     return '"' + "".join(out) + '"'
+
+
+def _one_line(value: str) -> str:
+    """Collapse a value onto a single line so it survives the note body.
+
+    The body is line-oriented and the indexer wins from it (a body checkbox
+    list replaces the frontmatter list outright), so a key point or action item
+    carrying an interior newline would be silently truncated at the first line
+    — and a continuation line starting with '## ' would even fake a heading and
+    cut the transcript out of the index. Whitespace and control characters are
+    folded to single spaces; no text is dropped.
+    """
+    text = "".join(
+        " " if (ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F or ch in ("\u2028", "\u2029"))
+        else ch
+        for ch in str(value)
+    )
+    return " ".join(text.split())
 
 
 def _quote_block(text: str) -> str:
@@ -130,6 +168,10 @@ def render_note(transcript: Transcript, insight: Insight, audio_name: str | None
     people_links = [_wikilink(p) for p in insight.people]
     headline = note_headline(transcript, insight)
     display_title = compose_display_title(headline, transcript.date)
+    # The body is line-oriented, and the indexer reads its list items in
+    # preference to the frontmatter, so every item has to fit on one line.
+    action_items = [_one_line(a) for a in insight.action_items]
+    key_points = [_one_line(kp) for kp in insight.key_points]
 
     fm_lines = ["---"]
     fm_lines.append(f"source: {transcript.source}")
@@ -168,10 +210,10 @@ def render_note(transcript: Transcript, insight: Insight, audio_name: str | None
     body.append(insight.summary or "_No summary._")
     body.append("")
     body.append("## Key Points")
-    body.extend([f"- {kp}" for kp in insight.key_points] or ["- _None._"])
+    body.extend([f"- {kp}" for kp in key_points] or ["- _None._"])
     body.append("")
     body.append("## Action Items")
-    body.extend([f"- [ ] {a}" for a in insight.action_items] or ["- _None._"])
+    body.extend([f"- [ ] {a}" for a in action_items] or ["- _None._"])
     body.append("")
     if insight.topics:
         body.append("## Topics")

@@ -29,7 +29,15 @@ from transcript_analyzer.obsidian.writer import _quote_block  # noqa: E402
 from transcript_analyzer.pipeline.indexer import index_note  # noqa: E402
 
 
-_HEADING_RE = re.compile(r"## Transcript\s*")
+def _is_transcript_heading(line: str) -> bool:
+    """The same heading rule indexer._extract_transcript matches on.
+
+    A stricter rule here would be worse than a no-op: _already_timed reads the
+    transcript through the indexer's lenient rule, so on a hand-edited
+    '## transcript' the two would disagree and a SECOND callout would be
+    appended instead of the existing one being rewritten.
+    """
+    return line.strip().lower() == "## transcript"
 
 
 def _replace_transcript_section(content: str, timed_text: str) -> str:
@@ -37,24 +45,25 @@ def _replace_transcript_section(content: str, timed_text: str) -> str:
 
     The vault is the source of truth and hand-edits are respected, so anything
     the owner appended below the callout must survive this migration. The
-    callout ends at the first line that is neither blank nor a '>' line — the
-    same stop rule indexer._extract_transcript uses.
+    callout ends at the first line that is not a '>' line, blank lines included:
+    _quote_block prefixes every transcript line with '> ', so an interior blank
+    line is emitted as '> ' and a truly blank line is always the end of what
+    this script wrote. Scanning past it would swallow a separate blockquote the
+    owner appended below.
     """
     block = "## Transcript\n" + _quote_block(timed_text)
     lines = content.splitlines()
     start = next(
-        (i for i, ln in enumerate(lines) if _HEADING_RE.fullmatch(ln)), None
+        (i for i, ln in enumerate(lines) if _is_transcript_heading(ln)), None
     )
     if start is None:
         return content.rstrip() + "\n\n" + block + "\n"
 
     end = start  # index of the last line belonging to the callout
     for i in range(start + 1, len(lines)):
-        ln = lines[i]
-        if ln.startswith(">"):
-            end = i
-        elif ln.strip():
+        if not lines[i].startswith(">"):
             break
+        end = i
     # Transcript text is arbitrary content, so it must never be used as a
     # re.sub template — a stray backslash raises "bad escape" (or worse,
     # silently expands a group reference). Splicing the lines is literal.

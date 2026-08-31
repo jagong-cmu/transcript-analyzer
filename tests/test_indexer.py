@@ -227,3 +227,52 @@ def test_malformed_note_does_not_abort_the_whole_reindex(cfg):
     with get_conn(cfg.db_path) as conn:
         recs = all_transcripts(conn)
     assert [r.transcript_id for r in recs] == ["abc123"]
+
+
+def test_multiline_body_list_items_are_not_truncated(cfg):
+    """The body list wins over the frontmatter in _parse_note, so an action
+    item or key point carrying an interior newline used to reach the DB (and
+    the commitments page, and every rollup) truncated at its first line — and a
+    continuation line starting with '## ' faked a heading that cut the
+    transcript out of the index entirely."""
+    from datetime import date as _date
+
+    from transcript_analyzer.models import Insight, Transcript
+    from transcript_analyzer.obsidian import writer
+
+    item = "Ship the migration:\nrun retitle_notes.py then backfill"
+    point = "Decision recorded\n## Transcript\n> injected"
+    transcript = Transcript(
+        id="t11",
+        source="granola",
+        native_id="n11",
+        title="raw",
+        date=_date(2026, 7, 1),
+        text="Ops: shipping the migration.",
+    )
+    insight = Insight(
+        headline="Migration plan",
+        summary="Shipping it.",
+        key_points=[point],
+        action_items=[item],
+        people=["Ops"],
+    )
+    p = write(
+        cfg.vault.insights_path / "2026-07-01 migration.md",
+        writer.render_note(transcript, insight),
+    )
+
+    rec = indexer.parse_note(p)
+    assert rec is not None
+    assert rec.action_items == [
+        "Ship the migration: run retitle_notes.py then backfill"
+    ]
+    assert rec.open_action_items == rec.action_items
+    # The injected heading never becomes a real one, so the transcript survives.
+    assert rec.transcript_text == "Ops: shipping the migration."
+    headings = [
+        ln
+        for ln in p.read_text(encoding="utf-8").splitlines()
+        if ln.strip().lower() == "## transcript"
+    ]
+    assert len(headings) == 1

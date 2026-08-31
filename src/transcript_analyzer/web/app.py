@@ -10,6 +10,7 @@ from fastapi import FastAPI, Form, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.concurrency import run_in_threadpool
 
 from .. import rag
 from ..config import load_config
@@ -159,7 +160,12 @@ async def categorize_now(request: Request):
             status_code=400,
         )
     try:
-        summary = organize.categorize(cfg, categories=defs, verbose=False)
+        # organize.categorize is fully synchronous and spends one blocking
+        # Anthropic call per note; on the event loop it would freeze every
+        # other request (including this page's own status poll) for minutes.
+        summary = await run_in_threadpool(
+            organize.categorize, cfg, categories=defs, verbose=False
+        )
     except LLMError as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=502)
     except Exception as e:  # noqa: BLE001

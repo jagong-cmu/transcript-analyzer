@@ -12,6 +12,7 @@ import argparse
 import os
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Iterable, Optional
 
 from .config import Config, load_config
@@ -74,14 +75,13 @@ def _limited(it: Iterable[Transcript], limit: Optional[int]) -> Iterable[Transcr
         yield x
 
 
-def _maybe_download_audio(cfg: Config, transcript: Transcript, insight) -> Optional[str]:
+def _maybe_download_audio(cfg: Config, transcript: Transcript, note_path: Path) -> Optional[str]:
     """Download a Pocket recording's audio into the vault. Returns the filename to embed."""
     if transcript.source != "pocket" or not cfg.pocket.download_audio:
         return None
     from .connectors.pocket_api import PocketClient  # lazy (needs key)
 
-    prospective = writer.note_path_for(cfg, transcript, insight)
-    dest = writer.audio_path_for(cfg, prospective)
+    dest = writer.audio_path_for(cfg, note_path)
     try:
         with PocketClient(cfg) as pc:
             got = pc.download_audio(transcript.native_id, dest)
@@ -124,8 +124,14 @@ def process_transcript(
     with get_conn(cfg.db_path) as conn:
         prev_path = get_sync_note_path(conn, transcript.source, transcript.native_id)
 
+    # A re-worded headline renames the note; carry its recording across first,
+    # so the download below finds the file the vault already has.
+    prospective = writer.note_path_for(cfg, transcript, insight)
+    if prev_path and prev_path != str(prospective):
+        writer.move_audio_with_note(cfg, Path(prev_path), prospective)
+
     # Download the recording's audio into the vault (Pocket only) and embed it.
-    audio_name = _maybe_download_audio(cfg, transcript, insight)
+    audio_name = _maybe_download_audio(cfg, transcript, prospective)
 
     note_path = writer.write_note(cfg, transcript, insight, audio_name=audio_name)
     result["note_path"] = str(note_path)

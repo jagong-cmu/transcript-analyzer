@@ -76,3 +76,66 @@ def test_content_after_the_transcript_callout_survives():
     assert "Notes I added by hand in Obsidian after the fact." in out
     # And the appended section stays below the rewritten callout.
     assert out.index("> [0:00] Hi") < out.index("## My follow-up")
+
+
+NOTE_WITH_TRAILING_CALLOUT = """# A note
+
+## Summary
+Something happened.
+
+## Transcript
+> [!note]- Full transcript
+> old untimed text
+
+> [!tip] My own note
+> remember to follow up
+"""
+
+
+def test_a_blockquote_appended_below_the_transcript_survives():
+    """Scanning across the blank line swallowed the owner's own callout: the
+    generated callout never contains a truly blank line (_quote_block writes
+    every transcript line as '> '), so the first one ends the region."""
+    out = backfill_timestamps._replace_transcript_section(
+        NOTE_WITH_TRAILING_CALLOUT, "[0:00] Hi"
+    )
+    assert "> [0:00] Hi" in out
+    assert "old untimed text" not in out
+    assert "> [!tip] My own note" in out
+    assert "> remember to follow up" in out
+    assert out.index("> [0:00] Hi") < out.index("> [!tip] My own note")
+
+
+def test_a_blank_line_inside_the_transcript_is_preserved():
+    """An empty transcript line is emitted as '> ', so it does not terminate
+    the callout and the whole transcript is still replaced."""
+    out = backfill_timestamps._replace_transcript_section(
+        NOTE_WITH_TRAILING_CALLOUT, "[0:00] Hi\n\n[0:30] Still here"
+    )
+    assert "> [0:00] Hi" in out
+    assert "> [0:30] Still here" in out
+    assert "> [!tip] My own note" in out
+
+
+def test_lowercase_or_indented_heading_is_replaced_not_duplicated():
+    """_already_timed reads the transcript through the indexer's lenient
+    heading rule, so a stricter rule here appended a SECOND transcript."""
+    for heading in ("## transcript", "  ## Transcript", "## Transcript  "):
+        note = NOTE.replace("## Transcript", heading)
+        out = backfill_timestamps._replace_transcript_section(note, "[0:00] Hi")
+        headings = [
+            ln for ln in out.splitlines() if ln.strip().lower() == "## transcript"
+        ]
+        assert len(headings) == 1, f"{heading!r} produced {len(headings)} sections"
+        assert "old untimed text" not in out
+        assert "> [0:00] Hi" in out
+
+
+def test_replaced_transcript_is_what_the_indexer_reads_back():
+    """The rewritten section has to survive the round trip the dashboard uses."""
+    from transcript_analyzer.pipeline.indexer import _extract_transcript
+
+    out = backfill_timestamps._replace_transcript_section(
+        NOTE, "[0:00] Hi\n\n[0:30] Bye"
+    )
+    assert _extract_transcript(out) == "[0:00] Hi\n\n[0:30] Bye"

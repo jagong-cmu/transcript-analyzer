@@ -116,12 +116,9 @@ def _rename_with_audio(cfg, old: Path, new: Path, *, dry_run: bool) -> Path:
         return new
     new.parent.mkdir(parents=True, exist_ok=True)
     old_audio = writer.audio_path_for(cfg, old)
-    new_audio = writer.audio_path_for(cfg, new)
     old.rename(new)
-    if old_audio.exists():
-        if new_audio.exists() and new_audio.resolve() != old_audio.resolve():
-            new_audio.unlink()
-        old_audio.rename(new_audio)
+    new_audio = writer.move_audio_with_note(cfg, old, new)
+    if new_audio is not None:
         # Fix embed reference inside the note if present.
         text = new.read_text(encoding="utf-8")
         text = text.replace(f"![[{old_audio.name}]]", f"![[{new_audio.name}]]")
