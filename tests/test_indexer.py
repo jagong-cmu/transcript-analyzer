@@ -384,9 +384,14 @@ def test_person_name_cannot_break_the_body_or_the_wikilink(cfg):
 
 
 def test_a_summary_line_opening_with_a_tag_or_rank_is_untouched(cfg):
-    """Only a markdown heading can open a section, so only that shape is
-    escaped: a '#hiring' or '#1 ' line was being rewritten into the vault with
-    a backslash that then round-tripped into the DB and the dashboard."""
+    """Only a heading that would CLOSE '## Summary' is escaped.
+
+    A '#hiring' or '#1 ' line was being rewritten into the vault with a
+    backslash that then round-tripped into the DB and the dashboard — neither
+    is a heading at all. Nor is a '#### ' line a problem: it is nested inside
+    the section, so it survives the round trip and the reader never sees an
+    escape. Only '#' and '##' can end the section, and only those are escaped.
+    """
     from datetime import date as _date
 
     from transcript_analyzer.models import Insight, Transcript
@@ -415,8 +420,9 @@ def test_a_summary_line_opening_with_a_tag_or_rank_is_untouched(cfg):
 
     rec = indexer.parse_note(p)
     assert rec is not None
-    # '#### ' IS a heading shape, so it alone is escaped; the rest are verbatim.
-    assert rec.detailed_summary == summary.replace("#### four", "\\#### four")
+    # Nothing here can close '## Summary', so nothing is escaped.
+    assert rec.detailed_summary == summary
+    assert "\\#" not in p.read_text()
     assert "\\#hiring" not in p.read_text(encoding="utf-8")
     assert "\\#1" not in p.read_text(encoding="utf-8")
     assert rec.transcript_text == "Angela: hello."

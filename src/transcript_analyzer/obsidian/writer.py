@@ -352,18 +352,26 @@ def _one_line(value: str) -> str:
     return " ".join(text.split())
 
 
-def _body_text(value: str) -> str:
+def _body_text(value: str, within: str = "") -> str:
     """Free text safe to place in the note body, keeping its line structure.
 
-    An LLM value whose own line would open a section opens one the writer never
-    opened: the real transcript stops being what the index, the dashboard and
-    RAG read back. Escaped exactly when `opens_section` says so — the same
-    predicate the reader uses — and left byte for byte otherwise, because the
-    escape itself round-trips into the index.
+    An LLM value whose own line would CLOSE the section it sits in opens one
+    the writer never opened: the real transcript stops being what the index,
+    the dashboard and RAG read back. `within` is the heading of the section
+    this text goes under, and the escape is bounded to exactly the levels that
+    would end it — the same bound `indexer.is_section_end` reads it back with,
+    so the two cannot disagree.
+
+    That bound matters now that a detailed summary is long enough to have its
+    own structure: a '###' nested under '## Summary' is INSIDE the section, so
+    it survives the round trip and must not be escaped — a backslash the
+    reader can see is a defect, not a safety measure. Without `within` the
+    old, maximal bound applies: every heading shape is escaped.
     """
+    max_level = heading_level(within) if within else 6
     out: list[str] = []
     for ln in str(value).splitlines() or [""]:
-        if opens_section(ln):
+        if opens_section(ln, max_level=max_level):
             indent = len(ln) - len(ln.lstrip())
             ln = ln[:indent] + "\\" + ln[indent:]
         out.append(ln)
@@ -639,7 +647,10 @@ def render_note(
         )
         body.append("")
     body.append("## Summary")
-    body.append(_body_text(insight.detailed_summary or insight.summary) or "_No summary._")
+    body.append(
+        _body_text(insight.detailed_summary or insight.summary, within="## Summary")
+        or "_No summary._"
+    )
     body.append("")
     body.append("## Key Points")
     body.extend([f"- {kp}" for kp in key_points] or ["- _None._"])

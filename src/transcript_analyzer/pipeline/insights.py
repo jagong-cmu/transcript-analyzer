@@ -33,9 +33,9 @@ from .llm import LLM
 # transcript this system will ever see). ~25k tokens of transcript.
 _MAX_CHARS = 100_000
 
-# The detailed summary is the long output here; 8k tokens of note is far more
+# The detailed summary is the long output here; 16k tokens of note is far more
 # than even a 45k-character lecture warrants, and leaves room for the rest.
-_MAX_TOKENS = 16_000
+MAX_TOKENS = 16_000
 
 INSIGHT_SCHEMA = {
     "type": "object",
@@ -139,7 +139,9 @@ USER_TEMPLATE = """Analyze the following transcript and return a JSON object wit
   to understand what happened, in order, without listening to the recording.
   Cover what was discussed or taught, how it developed, the reasoning, the
   examples and numbers used, what was decided or concluded, and what was left
-  open. Use short `##` subheadings when the recording had distinct parts.
+  open. Use short `###` subheadings when the recording had distinct parts
+  (`###`, not `##` — this text is placed inside the note's own `## Summary`
+  section, and a `##` line would end it).
   Length, proportional to the recording:
     * a short conversation (a few minutes): about 150 words;
     * an hour-long meeting or interview: 600-900 words;
@@ -182,6 +184,27 @@ def _course_hint(known: dict[str, Course]) -> str:
     )
 
 
+def extraction_prompt(
+    transcript: Transcript, known_courses: Optional[dict[str, Course]] = None
+) -> tuple[str, str]:
+    """The (system, user) pair for one extraction, whichever way it is sent.
+
+    One definition, two transports: the live per-transcript call and the
+    batched backfill. A second copy of this prompt would let the backfill
+    quietly summarize the vault to a different specification than sync does.
+    """
+    text = transcript.text
+    if len(text) > _MAX_CHARS:
+        text = text[:_MAX_CHARS] + "\n...[truncated]"
+    user = USER_TEMPLATE.format(
+        title=transcript.title,
+        participants=", ".join(transcript.participants) or "(unknown)",
+        course_hint=_course_hint(known_courses or {}),
+        text=text,
+    )
+    return SYSTEM, user
+
+
 def extract_insight(
     transcript: Transcript,
     cfg: Config,
@@ -191,21 +214,10 @@ def extract_insight(
     stage: str = "extract",
 ) -> Insight:
     llm = llm or LLM(cfg)
-
-    text = transcript.text
-    if len(text) > _MAX_CHARS:
-        text = text[:_MAX_CHARS] + "\n...[truncated]"
-
     known = known_courses or {}
-    user = USER_TEMPLATE.format(
-        title=transcript.title,
-        participants=", ".join(transcript.participants) or "(unknown)",
-        course_hint=_course_hint(known),
-        text=text,
-    )
-
+    system, user = extraction_prompt(transcript, known)
     data = llm.chat_json(
-        SYSTEM, user, schema=INSIGHT_SCHEMA, max_tokens=_MAX_TOKENS, stage=stage
+        SYSTEM, user, schema=INSIGHT_SCHEMA, max_tokens=MAX_TOKENS, stage=stage
     )
     return insight_from_payload(data, transcript, known_courses=known)
 

@@ -40,6 +40,7 @@ from ..titles import clean_headline, compose_display_title, headline_from_summar
 # and the writer cannot disagree about what a heading is (AGENTS.md).
 __all__ = [
     "EXCLUDED_SUBDIRS",
+    "extract_transcript",
     "index_note",
     "is_section_end",
     "is_section_start",
@@ -64,7 +65,7 @@ def _strip_wikilink(s: str) -> str:
     return m.group(1).strip() if m else s.strip()
 
 
-def _extract_transcript(body: str) -> str:
+def extract_transcript(body: str) -> str:
     """Pull the transcript text out of the '## Transcript' callout block.
 
     Where the callout ends is `writer.transcript_bounds` — the one definition,
@@ -87,6 +88,12 @@ def _extract_transcript(body: str) -> str:
             continue
         out.append(ln.lstrip(">")[1:] if ln.startswith("> ") else ln.lstrip(">"))
     return "\n".join(out).strip()
+
+
+# The one-shot migration scripts read a note's transcript back through the
+# same extractor the index uses, so a rewrite can never disagree with what was
+# indexed. Kept under the old private name too, for existing call sites.
+_extract_transcript = extract_transcript
 
 
 def _extract_summary(body: str) -> str:
@@ -197,7 +204,7 @@ def _parse_note(path: Path) -> Optional[NoteRecord]:
         course_code=str(meta.get("course_code") or "").strip(),
         course_name=str(meta.get("course_name") or "").strip(),
         note_path=str(path.resolve()),
-        transcript_text=_extract_transcript(post.content),
+        transcript_text=extract_transcript(post.content),
     )
 
 
