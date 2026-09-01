@@ -38,6 +38,8 @@ from ..config import Config, StudyConfig, load_config
 from ..db import all_transcripts, get_conn, get_meta, set_meta
 from ..models import NoteRecord
 from ..obsidian import writer
+from .citations import normalize as _norm
+from .citations import quote_matches
 from .llm import LLM, LLMError
 
 LAST_RUN_KEY = "synthesis_last_run"
@@ -64,16 +66,22 @@ CITE_RULES = """Citation rules (mechanically enforced — violations are discard
 
 
 # ---------- citation gate (R3: verbatim span, not a syntactic wikilink) ----------
-
-def _norm(s: str) -> str:
-    return " ".join(s.casefold().split())
+# The match itself lives in pipeline/citations.py, shared with the lecture
+# profile's gate so "cited" means one thing across the system.
 
 
 def _haystack(rec: NoteRecord) -> str:
-    return _norm(
-        "\n".join(
-            [rec.title, rec.summary, *rec.action_items, rec.transcript_text]
-        )
+    """Everything a claim about this conversation may be quoted from.
+
+    The MATERIAL AS SHOWN TO THE MODEL, and no more: `_entry` renders the
+    title, the retrieval summary and the open action items, and the full
+    transcript is what `fetch_transcript` returns. The long
+    `detailed_summary` is deliberately absent — nothing shows it to the
+    synthesis prompts, so admitting it here would widen the gate past what
+    the model could honestly have copied from.
+    """
+    return "\n".join(
+        [rec.title, rec.summary, *rec.action_items, rec.transcript_text]
     )
 
 
@@ -87,9 +95,9 @@ def verify_claims(
     for c in claims:
         text = str(c.get("text", "")).strip()
         sid = str(c.get("source_id", "")).strip()
-        quote = _norm(str(c.get("quote", "")))
+        quote = str(c.get("quote", ""))
         rec = by_id.get(sid)
-        if not text or rec is None or not quote or quote not in _haystack(rec):
+        if not text or rec is None or not quote_matches(quote, _haystack(rec)):
             dropped += 1
             continue
         kept.append({"text": text, "source_id": sid, "rec": rec})

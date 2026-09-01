@@ -27,9 +27,14 @@ CREATE TABLE IF NOT EXISTS transcripts (
     open_action_items TEXT NOT NULL DEFAULT '[]',
     attendees         TEXT NOT NULL DEFAULT '[]',
     summary           TEXT NOT NULL DEFAULT '',
+    detailed_summary  TEXT NOT NULL DEFAULT '',
+    kind              TEXT NOT NULL DEFAULT 'meeting',
+    course_code       TEXT NOT NULL DEFAULT '',
+    course_name       TEXT NOT NULL DEFAULT '',
     note_path         TEXT NOT NULL DEFAULT '',
     transcript_text   TEXT NOT NULL DEFAULT ''
 );
+CREATE INDEX IF NOT EXISTS idx_transcripts_kind ON transcripts(kind);
 
 -- Tracks what's already been ingested/processed, keyed by source + native id.
 CREATE TABLE IF NOT EXISTS sync_state (
@@ -79,6 +84,20 @@ def _migrate(conn: sqlite3.Connection) -> None:
             if col not in cols:
                 conn.execute(
                     f"ALTER TABLE transcripts ADD COLUMN {col} TEXT NOT NULL DEFAULT '[]'"
+                )
+        # The lecture profile's columns. The index is derived, so an existing
+        # DB just needs the columns to exist; a reindex fills them from the
+        # vault notes, which are the source of truth.
+        for col, default in (
+            ("detailed_summary", "''"),
+            ("kind", "'meeting'"),
+            ("course_code", "''"),
+            ("course_name", "''"),
+        ):
+            if col not in cols:
+                conn.execute(
+                    f"ALTER TABLE transcripts ADD COLUMN {col} TEXT NOT NULL "
+                    f"DEFAULT {default}"
                 )
 
 
@@ -159,9 +178,10 @@ def upsert_transcript(conn: sqlite3.Connection, rec: NoteRecord) -> None:
     conn.execute(
         """INSERT INTO transcripts
              (transcript_id, source, title, date, category, people, topics,
-              action_items, open_action_items, attendees, summary, note_path,
+              action_items, open_action_items, attendees, summary,
+              detailed_summary, kind, course_code, course_name, note_path,
               transcript_text)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(transcript_id) DO UPDATE SET
                source=excluded.source, title=excluded.title, date=excluded.date,
                category=excluded.category, people=excluded.people, topics=excluded.topics,
@@ -169,13 +189,18 @@ def upsert_transcript(conn: sqlite3.Connection, rec: NoteRecord) -> None:
                open_action_items=excluded.open_action_items,
                attendees=excluded.attendees,
                summary=excluded.summary,
+               detailed_summary=excluded.detailed_summary,
+               kind=excluded.kind,
+               course_code=excluded.course_code, course_name=excluded.course_name,
                note_path=excluded.note_path, transcript_text=excluded.transcript_text""",
         (
             rec.transcript_id, rec.source, rec.title, rec.date, rec.category,
             json.dumps(rec.people), json.dumps(rec.topics), json.dumps(rec.action_items),
             json.dumps(rec.open_action_items),
             json.dumps([a.model_dump() for a in rec.attendees]),
-            rec.summary, rec.note_path, rec.transcript_text,
+            rec.summary, rec.detailed_summary, rec.kind,
+            rec.course_code, rec.course_name,
+            rec.note_path, rec.transcript_text,
         ),
     )
 
@@ -193,9 +218,44 @@ def _row_to_note(row: sqlite3.Row) -> NoteRecord:
         open_action_items=json.loads(row["open_action_items"]),
         attendees=json.loads(row["attendees"]),
         summary=row["summary"],
+        detailed_summary=_col(row, "detailed_summary", ""),
+        kind=_col(row, "kind", "meeting") or "meeting",
+        course_code=_col(row, "course_code", ""),
+        course_name=_col(row, "course_name", ""),
         note_path=row["note_path"],
         transcript_text=row["transcript_text"],
     )
+
+
+def _col(row: sqlite3.Row, name: str, default: str) -> str:
+    """A column that a pre-migration row may not carry yet."""
+    try:
+        value = row[name]
+    except (IndexError, KeyError):
+        return default
+    return default if value is None else str(value)
+
+
+def known_course_rows(conn: sqlite3.Connection) -> list[tuple[str, str]]:
+    """(course_code, course_name) for every lecture in the index, newest first.
+
+    Feeds `courses.index_courses`, which is how week 2 of a course binds to
+    week 1 without a registry in config: the index describes the courses it
+    already holds back to the extraction prompt.
+    """
+    rows = conn.execute(
+        "SELECT course_code, course_name FROM transcripts "
+        "WHERE kind = 'lecture' AND course_code != '' "
+        "ORDER BY date DESC, transcript_id"
+    ).fetchall()
+    return [(r["course_code"], r["course_name"] or "") for r in rows]
+
+
+def lectures(conn: sqlite3.Connection) -> list[NoteRecord]:
+    rows = conn.execute(
+        "SELECT * FROM transcripts WHERE kind = 'lecture' ORDER BY date DESC, title"
+    ).fetchall()
+    return [_row_to_note(r) for r in rows]
 
 
 def all_transcripts(conn: sqlite3.Connection) -> list[NoteRecord]:

@@ -34,15 +34,31 @@ PARTIAL_DOWNLOAD_TTL_SECONDS = 20 * 60
 
 CATEGORIES_SUBDIR = "Categories"
 ATTACHMENTS_SUBDIR = "Attachments"
+# Lecture study notes and their rendered PDF. Adding a namespace here without
+# adding it to indexer.EXCLUDED_SUBDIRS breaks the feedback-loop guard and the
+# indexer starts ingesting synthesis output as if it were a transcript.
+STUDY_SUBDIR = "Study Notes"
 
 # The only vault namespaces synthesis may write into (namespace isolation:
 # generated notes never land next to — or over — transcript notes).
-SYNTH_SUBDIRS = ("Digests", "People", "Studies", "Prep", "Categories")
+SYNTH_SUBDIRS = ("Digests", "People", "Studies", "Prep", "Categories", STUDY_SUBDIR)
 
 SYNTH_BEGIN = "<!-- synth:begin — generated; edits inside this block are overwritten -->"
 SYNTH_END = "<!-- synth:end -->"
 
+# The transcript note's own managed region. A separate pair from the synthesis
+# one because the rule is different: a transcript note is regenerated from the
+# recording, but a ticked checkbox inside the region is a designed hand edit
+# and is carried across (see `write_note`). Everything below the end marker is
+# the vault owner's and is preserved untouched.
+NOTE_BEGIN = (
+    "<!-- transcript-analyzer:begin — regenerated from the recording; "
+    "write below the end marker to keep your own notes -->"
+)
+NOTE_END = "<!-- transcript-analyzer:end -->"
+
 _ATX_HEADING_RE = re.compile(r"(#{1,6})(?:\s|$)")
+_CHECKBOX_RE = re.compile(r"^\s*-\s*\[( |x|X)\]\s*(.+?)\s*$")
 
 
 def heading_level(line: str) -> int:
@@ -73,6 +89,83 @@ def opens_section(line: str, max_level: int = 6) -> bool:
     return 0 < level <= max_level
 
 
+def is_section_start(line: str, heading: str) -> bool:
+    """Whether `line` opens the named section ('## transcript', lowercase).
+
+    Lives beside `opens_section` because the writer is what emits these
+    headings; the indexer and the timestamp backfill call in rather than
+    re-deriving the test (see AGENTS.md: add call sites, not definitions).
+    """
+    return opens_section(line) and line.strip().lower() == heading
+
+
+def is_section_end(line: str, heading: str) -> bool:
+    """Whether `line` closes the section that `heading` opened.
+
+    The same predicate as the start, bounded to the section's own level: a
+    sibling or shallower heading ends it, a deeper one the vault owner wrote
+    ('### Context' under '## Summary') is nested inside and stays indexed.
+    """
+    return opens_section(line, max_level=heading_level(heading))
+
+
+def transcript_bounds(lines: list[str]) -> tuple[int, int] | None:
+    """(heading index, last line of the callout) for the '## Transcript' section.
+
+    THE one definition of the transcript section's grammar: the heading, an
+    optional run of blank lines, then the contiguous run of '>' lines that is
+    the callout — exactly what `_quote_block` emits. It ends there; a blank
+    line, a callout the owner appended, or any later section is theirs. When
+    no callout follows the heading, the section is the heading alone, so
+    nothing of theirs is ever spliced away. A transcript's own blank line is
+    written as '> ', which is what keeps it inside the run.
+
+    Three readers depend on this agreeing exactly — the indexer's transcript
+    extraction, the timestamp backfill's rewrite, and `write_note`'s recovery
+    of a hand-written tail from a note that predates the managed markers.
+    Disagreement silently duplicates a transcript or splices away the owner's
+    own text.
+    """
+    start = next(
+        (i for i, ln in enumerate(lines) if is_section_start(ln, "## transcript")),
+        None,
+    )
+    if start is None:
+        return None
+    i = start + 1
+    while i < len(lines) and not lines[i].strip():
+        i += 1
+    if i >= len(lines) or not lines[i].startswith(">"):
+        return (start, start)
+    while i + 1 < len(lines) and lines[i + 1].startswith(">"):
+        i += 1
+    return (start, i)
+
+
+def parse_action_items(body: str) -> list[tuple[str, bool]]:
+    """(text, done) pairs from the '## Action Items' checkbox list.
+
+    The note is the source of truth: ticking a box in Obsidian closes the
+    commitment, and a commitment the owner filed under their own '### …'
+    sub-heading is still one of theirs. Shared by the indexer (which turns
+    these into the commitment tracker's rows) and by `write_note` (which
+    carries ticked boxes across a regeneration).
+    """
+    out: list[tuple[str, bool]] = []
+    in_section = False
+    for ln in body.splitlines():
+        if is_section_start(ln, "## action items"):
+            in_section = True
+            continue
+        if in_section:
+            if is_section_end(ln, "## action items"):
+                break
+            m = _CHECKBOX_RE.match(ln)
+            if m:
+                out.append((m.group(2), m.group(1).lower() == "x"))
+    return out
+
+
 def attachments_dir(cfg: Config) -> Path:
     return cfg.vault.insights_path / ATTACHMENTS_SUBDIR
 
@@ -90,6 +183,40 @@ def audio_path_for(cfg: Config, note_path: Path) -> Path:
 def note_for_audio(audio_path: Path) -> Path:
     """The note whose stem claims this recording — the inverse of `audio_for_stem`."""
     return audio_path.parent.parent / f"{audio_path.stem}.md"
+
+
+def study_stem(note_stem: str) -> str:
+    """The stem the study notes and their PDF share, derived from the note's.
+
+    Deliberately NOT the note's own stem: two vault files with the same name
+    make every `[[wikilink]]` to it ambiguous, and Obsidian would start
+    resolving the hub's links to the study note instead of the transcript.
+    """
+    return f"{note_stem} (study notes)"
+
+
+def study_note_for(insights_root: Path, note_stem: str) -> Path:
+    """The one definition of where a note's study notes live."""
+    return insights_root / STUDY_SUBDIR / f"{study_stem(note_stem)}.md"
+
+
+def study_note_path_for(cfg: Config, note_path: Path) -> Path:
+    return study_note_for(cfg.vault.insights_path, note_path.stem)
+
+
+def study_pdf_for(study_md: Path) -> Path:
+    """The PDF keyed to a study note — the inverse pairing of note and audio.
+
+    A PDF carries no frontmatter we read, so the study note sitting at its
+    stem is the only thing that can prove whose it is. Same shape as
+    `audio_for_stem` / `note_for_audio`, same reason.
+    """
+    return study_md.with_suffix(".pdf")
+
+
+def study_pdf_path_for(cfg: Config, note_path: Path) -> Path:
+    """Where a transcript note's rendered study-notes PDF lives (if any)."""
+    return study_pdf_for(study_note_path_for(cfg, note_path))
 
 
 def audio_partial(audio_path: Path) -> Path:
@@ -312,8 +439,47 @@ def claimable_stem(
     return in_flight_download or not partial_claims_stem(audio)
 
 
-def claim_note_path(base: Path, transcript_id: str) -> Path:
+def claimable_study_stem(study_md: Path, transcript_id: str) -> bool:
+    """Whether the study-notes stem — the .md AND its .pdf — is free or ours.
+
+    The same proof as `claimable_stem`, over the pair of files a study stem
+    names. The markdown study note carries `transcript_id` in its frontmatter,
+    so unlike audio BOTH ends of a study move can be proven directly; the PDF
+    is claimed through the note at its stem, and a PDF with no note beside it
+    is somebody else's file to leave alone.
+    """
+    if owns_note(study_md, transcript_id):
+        return True
+    if study_md.exists():
+        return False
+    return not study_pdf_for(study_md).exists()
+
+
+def _claim_path(base: Path, transcript_id: str, claimable) -> Path:
     """The path this transcript may safely occupy, preferring `base`.
+
+    THE suffix ladder, shared by every namespace that claims a stem, so the
+    "not ours -> `<stem> (<id6>)`" fallback cannot drift between them.
+    `claimable` is the namespace's own proof of what a stem covers (the note
+    plus its recording; or the study note plus its PDF).
+    """
+    if claimable(base, transcript_id):
+        return base
+    short = transcript_id[:6] or "note"
+    candidate = base.with_name(f"{base.stem} ({short}){base.suffix}")
+    n = 2
+    while not claimable(candidate, transcript_id):
+        candidate = base.with_name(f"{base.stem} ({short}-{n}){base.suffix}")
+        n += 1
+    _log.warning(
+        "%s is not this transcript's to write; using %s instead",
+        base.name, candidate.name,
+    )
+    return candidate
+
+
+def claim_note_path(base: Path, transcript_id: str) -> Path:
+    """The path this transcript's NOTE may safely occupy, preferring `base`.
 
     The one definition of "where may this transcript's note go", shared by the
     sync path (`note_path_for`) and the retitle migration, so the two cannot
@@ -323,19 +489,53 @@ def claim_note_path(base: Path, transcript_id: str) -> Path:
     `<stem> (<id6>).md` and keeps going rather than landing on files that are
     not ours.
     """
-    if claimable_stem(base, transcript_id):
-        return base
-    short = transcript_id[:6] or "note"
-    candidate = base.with_name(f"{base.stem} ({short}){base.suffix}")
-    n = 2
-    while not claimable_stem(candidate, transcript_id):
-        candidate = base.with_name(f"{base.stem} ({short}-{n}){base.suffix}")
-        n += 1
-    _log.warning(
-        "%s is not this transcript's to write; using %s instead",
-        base.name, candidate.name,
-    )
-    return candidate
+    return _claim_path(base, transcript_id, claimable_stem)
+
+
+def claim_study_path(base: Path, transcript_id: str) -> Path:
+    """The same rule for the study-notes stem (the .md and its .pdf)."""
+    return _claim_path(base, transcript_id, claimable_study_stem)
+
+
+def move_study_with_note(
+    cfg: Config, old_note: Path, new_note: Path, transcript_id: str
+) -> Path | None:
+    """Make a note's study notes and PDF follow it when its filename changes.
+
+    Same both-ends proof as `move_audio_with_note`, and the same failure
+    posture: a stem that cannot be proven ours is left alone and named in a
+    warning. The vault has no backup, so an orphaned PDF to delete by hand
+    beats a move that overwrites somebody else's file. Returns the new study
+    note path when something moved.
+    """
+    old_md = study_note_path_for(cfg, old_note)
+    new_md = study_note_path_for(cfg, new_note)
+    if old_md.resolve() == new_md.resolve() or not old_md.exists():
+        return None
+    if not owns_note(old_md, transcript_id):
+        _log.warning(
+            "leaving %s where it is: its transcript_id does not prove the study "
+            "notes are this transcript's to move (orphan, clean up by hand)",
+            old_md,
+        )
+        return None
+    if not claimable_study_stem(new_md, transcript_id):
+        _log.warning(
+            "leaving %s in place: %s is not this transcript's stem to take "
+            "(orphan, clean up by hand)",
+            old_md, new_md,
+        )
+        return None
+    new_md.parent.mkdir(parents=True, exist_ok=True)
+    old_pdf, new_pdf = study_pdf_for(old_md), study_pdf_for(new_md)
+    if new_md.exists():
+        new_md.unlink()
+    old_md.rename(new_md)
+    if old_pdf.exists():
+        if new_pdf.exists():
+            new_pdf.unlink()
+        old_pdf.rename(new_pdf)
+    return new_md
 
 
 def note_headline(transcript: Transcript, insight: Insight) -> str:
@@ -352,7 +552,25 @@ def note_path_for(cfg: Config, transcript: Transcript, insight: Insight) -> Path
     return claim_note_path(base, transcript.id)
 
 
-def render_note(transcript: Transcript, insight: Insight, audio_name: str | None = None) -> str:
+def render_note(
+    transcript: Transcript,
+    insight: Insight,
+    audio_name: str | None = None,
+    *,
+    study_stem_name: str | None = None,
+    asr_repairs: list | None = None,
+    checked: frozenset[str] = frozenset(),
+) -> str:
+    """The full generated text of a transcript note.
+
+    Frontmatter, then everything between the managed markers. The caller
+    splices this over whatever the note held before, keeping the vault
+    owner's own text below `NOTE_END` (see `write_note`).
+
+    `checked` carries the action items the reader had already ticked, so a
+    regeneration does not silently reopen closed commitments — ticking a box
+    in Obsidian is the designed way to close one.
+    """
     people_links = [_wikilink(p) for p in insight.people]
     headline = note_headline(transcript, insight)
     display_title = compose_display_title(headline, transcript.date)
@@ -360,12 +578,22 @@ def render_note(transcript: Transcript, insight: Insight, audio_name: str | None
     # preference to the frontmatter, so every item has to fit on one line.
     action_items = [_one_line(a) for a in insight.action_items]
     key_points = [_one_line(kp) for kp in insight.key_points]
+    repairs = list(asr_repairs or [])
 
     fm_lines = ["---"]
     fm_lines.append(f"source: {transcript.source}")
     fm_lines.append(f"date: {transcript.date.isoformat()}")
     fm_lines.append(f"transcript_id: {transcript.id}")
     fm_lines.append(f"headline: {_yaml_str(headline)}")
+    fm_lines.append(f"kind: {_yaml_str(insight.kind)}")
+    if insight.course_code:
+        fm_lines.append(f"course_code: {_yaml_str(insight.course_code)}")
+    if insight.course_name:
+        fm_lines.append(f"course_name: {_yaml_str(insight.course_name)}")
+    # The one-paragraph retrieval abstract. It lives in frontmatter, not the
+    # body, because the body's '## Summary' is now the long-form summary the
+    # reader gets — and every corpus-wide reader still needs the short one.
+    fm_lines.append(f"abstract: {_yaml_str(_one_line(insight.summary))}")
     fm_lines.append("people:")
     for p in people_links:
         fm_lines.append(f"  - {_yaml_str(p)}")
@@ -381,11 +609,20 @@ def render_note(transcript: Transcript, insight: Insight, audio_name: str | None
     fm_lines.append("action_items:")
     for a in insight.action_items:
         fm_lines.append(f"  - {_yaml_str(a)}")
+    if repairs:
+        # Every ASR repair is listed for audit: the reader can see exactly
+        # which spoken text was rewritten, and check it against the transcript.
+        fm_lines.append("asr_repairs:")
+        for r in repairs:
+            fm_lines.append(f"  - heard: {_yaml_str(r.heard)}")
+            fm_lines.append(f"    corrected: {_yaml_str(r.corrected)}")
+    if study_stem_name:
+        fm_lines.append(f"study_notes: {_yaml_str(study_stem_name)}")
     if insight.sentiment:
         fm_lines.append(f"sentiment: {insight.sentiment}")
     fm_lines.append("---")
 
-    body = [f"# {display_title}", ""]
+    body = [NOTE_BEGIN, "", f"# {display_title}", ""]
     if people_links:
         body.append("**People:** " + ", ".join(people_links))
     body.append(f"**Source:** {transcript.source}  ·  **Date:** {format_long_date(transcript.date)}")
@@ -394,14 +631,24 @@ def render_note(transcript: Transcript, insight: Insight, audio_name: str | None
         body.append("## Recording")
         body.append(f"![[{audio_name}]]")
         body.append("")
+    if study_stem_name:
+        body.append("## Study Notes")
+        body.append(
+            f"- [[{study_stem_name}|Full study notes]]"
+            f"  ·  [[{study_stem_name}.pdf|Printable PDF]]"
+        )
+        body.append("")
     body.append("## Summary")
-    body.append(_body_text(insight.summary) or "_No summary._")
+    body.append(_body_text(insight.detailed_summary or insight.summary) or "_No summary._")
     body.append("")
     body.append("## Key Points")
     body.extend([f"- {kp}" for kp in key_points] or ["- _None._"])
     body.append("")
     body.append("## Action Items")
-    body.extend([f"- [ ] {a}" for a in action_items] or ["- _None._"])
+    body.extend(
+        [f"- [{'x' if a in checked else ' '}] {a}" for a in action_items]
+        or ["- _None._"]
+    )
     body.append("")
     if insight.topics:
         body.append("## Topics")
@@ -410,8 +657,42 @@ def render_note(transcript: Transcript, insight: Insight, audio_name: str | None
     body.append("## Transcript")
     body.append(_quote_block(transcript.text))
     body.append("")
+    body.append(NOTE_END)
 
-    return "\n".join(fm_lines) + "\n\n" + "\n".join(body)
+    return "\n".join(fm_lines) + "\n\n" + "\n".join(body) + "\n"
+
+
+def _owner_tail(path: Path) -> str:
+    """Whatever the vault owner wrote below the generated region, if anything.
+
+    Two shapes, because notes written before the managed markers existed have
+    no end marker: after `NOTE_END` when it is there, and otherwise after the
+    transcript callout, whose end `transcript_bounds` is the one definition
+    of. Anything this returns is appended back verbatim after the regenerated
+    region — the note is the source of truth and hand edits are respected.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+    idx = text.find(NOTE_END)
+    if idx != -1:
+        return text[idx + len(NOTE_END):]
+    lines = text.splitlines()
+    bounds = transcript_bounds(lines)
+    if bounds is None:
+        return ""
+    tail = "\n".join(lines[bounds[1] + 1:])
+    return ("\n" + tail) if tail.strip() else ""
+
+
+def _checked_items(path: Path) -> frozenset[str]:
+    """Action items the reader has already ticked in this note."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return frozenset()
+    return frozenset(t for t, done in parse_action_items(text) if done)
 
 
 def write_note(
@@ -421,6 +702,8 @@ def write_note(
     audio_name: str | None = None,
     *,
     path: Path | None = None,
+    study_stem_name: str | None = None,
+    asr_repairs: list | None = None,
 ) -> Path:
     """Write the note, at `path` when the caller already claimed one.
 
@@ -436,6 +719,11 @@ def write_note(
     without one until the transcript itself changes. Either way the name in the
     body and the file on disk cannot disagree, and nothing unowned is written
     over.
+
+    Regeneration is a SPLICE, not an overwrite: the generated region replaces
+    what was there, and anything the owner wrote below it — plus the boxes
+    they ticked inside it — comes back. Only a note we can prove is ours is
+    ever read for that; a stranger's file is not opened for its content.
     """
     if path is None:
         path = note_path_for(cfg, transcript, insight)
@@ -447,17 +735,41 @@ def write_note(
         )
         audio_name = None
         path = note_path_for(cfg, transcript, insight)
+    ours = owns_note(path, transcript.id)
+    tail = _owner_tail(path) if ours else ""
+    checked = _checked_items(path) if ours else frozenset()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_note(transcript, insight, audio_name=audio_name), encoding="utf-8")
+    generated = render_note(
+        transcript,
+        insight,
+        audio_name=audio_name,
+        study_stem_name=study_stem_name,
+        asr_repairs=asr_repairs,
+        checked=checked,
+    )
+    path.write_text(generated + tail, encoding="utf-8")
     return path
 
 
-def write_managed(cfg: Config, path: Path, generated: str, *, title: str = "") -> Path:
+def write_managed(
+    cfg: Config,
+    path: Path,
+    generated: str,
+    *,
+    title: str = "",
+    transcript_id: str = "",
+) -> Path:
     """Write generated content into a synthesis note, preserving user edits.
 
     Only the region between the synth markers is ever rewritten; anything the
     user adds outside it survives regeneration (R9). Refuses to write outside
-    the synthesis namespaces (Digests/, People/, Studies/, Prep/).
+    the synthesis namespaces (Digests/People/Studies/Prep/Categories/Study Notes).
+
+    `transcript_id` is for the per-transcript namespace (Study Notes/), where a
+    file is one transcript's rather than the namespace's as a whole: it is
+    stamped into the frontmatter so the note can later prove whose it is, and
+    an existing file that does NOT prove it is refused rather than rewritten.
+    The corpus-wide notes (a digest, a dossier) pass none and are unaffected.
     """
     root = cfg.vault.insights_path.resolve()
     resolved = path.resolve()
@@ -468,6 +780,11 @@ def write_managed(cfg: Config, path: Path, generated: str, *, title: str = "") -
     if not rel.parts or rel.parts[0] not in SYNTH_SUBDIRS:
         raise ValueError(
             f"synthesis may only write under {SYNTH_SUBDIRS}, got: {rel}"
+        )
+    if transcript_id and resolved.exists() and not owns_note(resolved, transcript_id):
+        raise ValueError(
+            f"refusing to rewrite {path}: its transcript_id does not prove it "
+            f"belongs to {transcript_id}"
         )
 
     region = f"{SYNTH_BEGIN}\n{generated.strip()}\n{SYNTH_END}"
@@ -481,7 +798,10 @@ def write_managed(cfg: Config, path: Path, generated: str, *, title: str = "") -
             # User removed the markers — append a fresh region, never clobber.
             new_text = text.rstrip() + "\n\n" + region + "\n"
     else:
-        head = ["---", "synth: true", "---", ""]
+        head = ["---", "synth: true"]
+        if transcript_id:
+            head.append(f"transcript_id: {transcript_id}")
+        head += ["---", ""]
         if title:
             head.append(f"# {title}")
             head.append("")
@@ -489,6 +809,42 @@ def write_managed(cfg: Config, path: Path, generated: str, *, title: str = "") -
     resolved.parent.mkdir(parents=True, exist_ok=True)
     resolved.write_text(new_text, encoding="utf-8")
     return resolved
+
+
+def write_study_note(
+    cfg: Config, note_path: Path, transcript_id: str, generated: str, *, title: str = ""
+) -> Path:
+    """Write a lecture's markdown study notes beside (not over) anything else.
+
+    The claim comes first and covers the whole study stem — the markdown and
+    the PDF that shares its name — so the PDF written next has a note at its
+    stem that proves whose it is.
+    """
+    base = study_note_path_for(cfg, note_path)
+    path = claim_study_path(base, transcript_id)
+    return write_managed(
+        cfg, path, generated, title=title, transcript_id=transcript_id
+    )
+
+
+def write_study_pdf(study_md: Path, transcript_id: str, pdf_bytes: bytes) -> Path | None:
+    """Write the rendered PDF at a study stem that is PROVABLY this one's.
+
+    A PDF carries no frontmatter, so the study note beside it is the only
+    proof — exactly the rule that governs an mp3 in Attachments/. No note, or
+    a note that is someone else's, means the PDF is not written and the reason
+    is logged; nothing unowned is replaced.
+    """
+    if not owns_note(study_md, transcript_id):
+        _log.warning(
+            "not writing %s: no study note at that stem proves it is this "
+            "transcript's", study_pdf_for(study_md),
+        )
+        return None
+    pdf = study_pdf_for(study_md)
+    pdf.parent.mkdir(parents=True, exist_ok=True)
+    pdf.write_bytes(pdf_bytes)
+    return pdf
 
 
 def rebuild_indexes(cfg: Config) -> None:

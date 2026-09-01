@@ -23,38 +23,40 @@ import frontmatter
 
 from ..config import Config
 from ..db import get_conn, upsert_transcript
-from ..models import Attendee, NoteRecord
-from ..obsidian.writer import heading_level, opens_section
+from ..models import DEFAULT_KIND, Attendee, NoteRecord, coerce_kind
+from ..obsidian.writer import (
+    STUDY_SUBDIR,
+    heading_level,
+    is_section_end,
+    is_section_start,
+    opens_section,
+    parse_action_items,
+    transcript_bounds,
+)
 from ..titles import clean_headline, compose_display_title, headline_from_summary
+
+# Re-exported: `heading_level`, `opens_section`, `is_section_start` and
+# `is_section_end` are the writer's definitions, imported here so the reader
+# and the writer cannot disagree about what a heading is (AGENTS.md).
+__all__ = [
+    "EXCLUDED_SUBDIRS",
+    "index_note",
+    "is_section_end",
+    "is_section_start",
+    "parse_note",
+    "reindex_all",
+]
 
 _log = logging.getLogger(__name__)
 
 _WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
-_CHECKBOX_RE = re.compile(r"^\s*-\s*\[( |x|X)\]\s*(.+?)\s*$")
 
-# Subfolders of the insights folder that are never transcript notes.
+# Subfolders of the insights folder that are never transcript notes. Every
+# namespace synthesis writes into belongs here AND in writer.SYNTH_SUBDIRS;
+# a namespace missing from this set is re-ingested as if it were a transcript.
 EXCLUDED_SUBDIRS = frozenset(
-    {"Categories", "Digests", "People", "Studies", "Prep", "Attachments"}
+    {"Categories", "Digests", "People", "Studies", "Prep", "Attachments", STUDY_SUBDIR}
 )
-
-
-def is_section_start(line: str, heading: str) -> bool:
-    """Whether `line` opens the named section ('## transcript', lowercase).
-
-    Section detection goes through writer.opens_section so the reader and the
-    writer cannot disagree about what a heading is; see AGENTS.md.
-    """
-    return opens_section(line) and line.strip().lower() == heading
-
-
-def is_section_end(line: str, heading: str) -> bool:
-    """Whether `line` closes the section that `heading` opened.
-
-    The same predicate as the start, bounded to the section's own level: a
-    sibling or shallower heading ends it, a deeper one the vault owner wrote
-    ('### Context' under '## Summary') is nested inside and stays indexed.
-    """
-    return opens_section(line, max_level=heading_level(heading))
 
 
 def _strip_wikilink(s: str) -> str:
@@ -65,27 +67,21 @@ def _strip_wikilink(s: str) -> str:
 def _extract_transcript(body: str) -> str:
     """Pull the transcript text out of the '## Transcript' callout block.
 
-    The section is the heading, an optional run of blank lines, and then the
-    contiguous run of '>' lines that is the callout — the same grammar the
-    writer emits and the timestamp backfill rewrites. Reading past the end of
-    that run would fold a callout the vault owner appended below the transcript
-    into transcript_text, publishing it in the dashboard and the RAG corpus.
-    An interior blank transcript line is written as '> ', so it stays inside.
+    Where the callout ends is `writer.transcript_bounds` — the one definition,
+    shared with the writer that emits it and the timestamp backfill that
+    rewrites it. Reading past that run would fold a callout the vault owner
+    appended below the transcript into transcript_text, publishing it in the
+    dashboard and the RAG corpus.
     """
     lines = body.splitlines()
-    start = next(
-        (i for i, ln in enumerate(lines) if is_section_start(ln, "## transcript")),
-        None,
-    )
-    if start is None:
+    bounds = transcript_bounds(lines)
+    if bounds is None:
         return ""
-    i = start + 1
-    while i < len(lines) and not lines[i].strip():
-        i += 1
+    start, end = bounds
     out: list[str] = []
-    while i < len(lines) and lines[i].startswith(">"):
-        ln = lines[i]
-        i += 1
+    for ln in lines[start + 1: end + 1]:
+        if not ln.startswith(">"):
+            continue
         # skip the "[!note]- ..." callout header line
         if ln.lstrip(">").strip().startswith("[!"):
             continue
@@ -114,25 +110,10 @@ def _extract_summary(body: str) -> str:
     return "\n".join(out).strip()
 
 
-def _extract_action_items(body: str) -> list[tuple[str, bool]]:
-    """(text, done) pairs from the '## Action Items' checkbox list. The note
-    is the source of truth: ticking a box in Obsidian closes the commitment,
-    and a commitment the owner filed under their own '### …' sub-heading is
-    still one of theirs. The section ends as `is_section_end` says, as above."""
-    lines = body.splitlines()
-    out: list[tuple[str, bool]] = []
-    in_section = False
-    for ln in lines:
-        if is_section_start(ln, "## action items"):
-            in_section = True
-            continue
-        if in_section:
-            if is_section_end(ln, "## action items"):
-                break
-            m = _CHECKBOX_RE.match(ln)
-            if m:
-                out.append((m.group(2), m.group(1).lower() == "x"))
-    return out
+# The '## Action Items' checkbox scan is `writer.parse_action_items` — one
+# definition, because the writer has to read the same ticks back when it
+# regenerates a note and must not reopen a commitment the owner closed.
+_extract_action_items = parse_action_items
 
 
 def _parse_attendees(meta: dict) -> list[Attendee]:
@@ -185,12 +166,17 @@ def _parse_note(path: Path) -> Optional[NoteRecord]:
         action_items = fm_action_items
         open_items = fm_action_items
 
-    summary = _extract_summary(post.content)
+    # The body's '## Summary' is the LONG summary the reader gets; the short
+    # retrieval abstract lives in frontmatter. A note written before that split
+    # has no `abstract:` — its body summary was already short, so it becomes
+    # both, and the corpus every Ask question carries does not silently grow.
+    detailed = _extract_summary(post.content)
+    abstract = " ".join(str(meta.get("abstract") or "").split()) or _abstract_from(detailed)
     headline = clean_headline(str(meta.get("headline") or ""))
     if not headline:
         # Legacy notes: prefer H1 with date stripped, else first summary sentence.
         headline = clean_headline(_extract_h1(post.content)) or headline_from_summary(
-            summary, fallback=path.stem
+            abstract, fallback=path.stem
         )
     display_title = _display_title(headline, date_str)
 
@@ -205,10 +191,29 @@ def _parse_note(path: Path) -> Optional[NoteRecord]:
         action_items=action_items,
         open_action_items=open_items,
         attendees=_parse_attendees(meta),
-        summary=summary,
+        summary=abstract,
+        detailed_summary=detailed,
+        kind=coerce_kind(str(meta.get("kind") or DEFAULT_KIND)),
+        course_code=str(meta.get("course_code") or "").strip(),
+        course_name=str(meta.get("course_name") or "").strip(),
         note_path=str(path.resolve()),
         transcript_text=_extract_transcript(post.content),
     )
+
+
+# An abstract standing in for a legacy note is bounded for the same reason the
+# real one is: this is the field Ask sends for every conversation, on every
+# question. A long body summary contributes its opening paragraph, not itself.
+_ABSTRACT_FALLBACK_CHARS = 900
+
+
+def _abstract_from(detailed: str) -> str:
+    """The retrieval abstract for a note that has no `abstract:` in frontmatter."""
+    for block in str(detailed or "").split("\n\n"):
+        para = " ".join(block.split())
+        if para and not para.startswith("#"):
+            return para[:_ABSTRACT_FALLBACK_CHARS].rstrip()
+    return " ".join(str(detailed or "").split())[:_ABSTRACT_FALLBACK_CHARS].rstrip()
 
 
 def _display_title(headline: str, date_str: str) -> str:
