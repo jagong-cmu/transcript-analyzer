@@ -78,12 +78,14 @@ def heading_level(line: str) -> int:
 def opens_section(line: str, max_level: int = 6) -> bool:
     """Whether the line opens a section no deeper than `max_level`.
 
-    `max_level` is what lets one definition serve both jobs. The writer escapes
-    with the default, because over-escaping the body is harmless and closes the
-    injection hole. TERMINATION is level-aware: a '## Summary' section ends at
-    the next heading of its own level or shallower, while a '### …' the vault
-    owner wrote is nested INSIDE it and must stay in the indexed section — the
-    note is the source of truth and hand edits are respected.
+    `max_level` is what lets one definition serve both jobs — ESCAPING what
+    would break a section open, and finding where a section ENDS — at the same
+    bound. A '## Summary' section ends at the next heading of its own level or
+    shallower, while a '### …' is nested INSIDE it: that is true of a heading
+    the vault owner wrote (their commitments stay indexed) and of one the model
+    wrote inside a long summary (it stays real structure instead of picking up
+    a backslash the reader can see). Escaping past that bound is not harmless
+    any more, so `_body_text` passes the section it is writing into.
     """
     level = heading_level(line)
     return 0 < level <= max_level
@@ -688,13 +690,17 @@ def _owner_tail(path: Path) -> str:
         return ""
     idx = text.find(NOTE_END)
     if idx != -1:
-        return text[idx + len(NOTE_END):]
-    lines = text.splitlines()
-    bounds = transcript_bounds(lines)
-    if bounds is None:
-        return ""
-    tail = "\n".join(lines[bounds[1] + 1:])
-    return ("\n" + tail) if tail.strip() else ""
+        tail = text[idx + len(NOTE_END):]
+    else:
+        lines = text.splitlines()
+        bounds = transcript_bounds(lines)
+        if bounds is None:
+            return ""
+        tail = "\n".join(lines[bounds[1] + 1:])
+    # Leading blank lines are the separator, not content: returning them and
+    # then adding one back would grow the gap by a line on EVERY regeneration.
+    # The caller re-emits exactly one.
+    return tail.lstrip("\n") if tail.strip() else ""
 
 
 def _checked_items(path: Path) -> frozenset[str]:
@@ -763,7 +769,9 @@ def write_note(
         asr_repairs=asr_repairs,
         checked=checked,
     )
-    path.write_text(generated + tail, encoding="utf-8")
+    # `generated` already ends in a newline, so one more is exactly one blank
+    # line between the managed region and the owner's own text.
+    path.write_text(generated + (f"\n{tail}" if tail else ""), encoding="utf-8")
     return path
 
 
@@ -827,17 +835,34 @@ def write_managed(
     return resolved
 
 
+def claim_study_note_path(cfg: Config, note_path: Path, transcript_id: str) -> Path:
+    """The study-notes path this transcript may occupy for a given note.
+
+    Separate from the write because the CONTENT names it: the markdown links
+    its own PDF by stem, and the ladder may have moved that stem. One claim,
+    threaded through the link and the write, the same way `note_path_for` is
+    threaded through the audio embed and `write_note`.
+    """
+    return claim_study_path(study_note_path_for(cfg, note_path), transcript_id)
+
+
 def write_study_note(
-    cfg: Config, note_path: Path, transcript_id: str, generated: str, *, title: str = ""
+    cfg: Config,
+    note_path: Path,
+    transcript_id: str,
+    generated: str,
+    *,
+    title: str = "",
+    path: Path | None = None,
 ) -> Path:
     """Write a lecture's markdown study notes beside (not over) anything else.
 
-    The claim comes first and covers the whole study stem — the markdown and
-    the PDF that shares its name — so the PDF written next has a note at its
-    stem that proves whose it is.
+    The claim covers the whole study stem — the markdown and the PDF that
+    shares its name — so the PDF written next has a note at its stem that
+    proves whose it is.
     """
-    base = study_note_path_for(cfg, note_path)
-    path = claim_study_path(base, transcript_id)
+    if path is None:
+        path = claim_study_note_path(cfg, note_path, transcript_id)
     return write_managed(
         cfg, path, generated, title=title, transcript_id=transcript_id
     )

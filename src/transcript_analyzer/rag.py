@@ -85,12 +85,23 @@ def _corpus(records: list[NoteRecord]) -> tuple[str, dict[int, NoteRecord]]:
 
 
 def _render_full(rec: NoteRecord) -> str:
+    """One whole note, as the fetch tool returns it.
+
+    The LONG summary goes here, not the index abstract: the index already
+    showed the abstract, and a fetch is exactly the moment the extra detail is
+    worth its tokens. Sending it in the index instead is what would triple the
+    corpus every question carries (see AGENTS.md).
+    """
     text = rec.transcript_text or "(no transcript text)"
     if len(text) > _MAX_NOTE_CHARS:
         text = text[:_MAX_NOTE_CHARS] + "\n...[truncated]"
+    header = f"Title: {rec.title}\nDate: {rec.date}\nPeople: {', '.join(rec.people)}"
+    if rec.is_lecture:
+        course = " ".join(p for p in (rec.course_code, rec.course_name) if p)
+        header += f"\nLecture{f' in {course}' if course else ''}"
     return (
-        f"Title: {rec.title}\nDate: {rec.date}\nPeople: {', '.join(rec.people)}\n\n"
-        f"Summary:\n{rec.summary}\n\nTranscript:\n{text}"
+        f"{header}\n\nSummary:\n{rec.detailed_summary or rec.summary}\n\n"
+        f"Transcript:\n{text}"
     )
 
 
@@ -174,6 +185,7 @@ def stream_events(
     text_parts: list[str] = []
     for _round in range(_MAX_ROUNDS):
         with llm.stream(
+            stage="ask",
             system=SYSTEM,
             messages=messages,
             tools=[FETCH_TOOL],

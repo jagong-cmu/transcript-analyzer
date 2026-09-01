@@ -120,3 +120,18 @@ def test_the_transcript_still_round_trips_through_the_markers(cfg):
     text = "[0:01] Angela: first line.\n\n[0:09] Angela: after a blank line."
     path = writer.write_note(cfg, transcript(text), insight())
     assert indexer.parse_note(path).transcript_text == text
+
+
+def test_repeated_regeneration_does_not_grow_the_gap(cfg):
+    """The tail's leading blank line is a separator, not content: returning it
+    and adding one back grew the note by a line on every single sync."""
+    path = writer.write_note(cfg, transcript(), insight())
+    path.write_text(path.read_text() + "\n## Mine\nKept.\n", encoding="utf-8")
+
+    shapes = set()
+    for i in range(4):
+        writer.write_note(cfg, transcript(f"[0:0{i}] words {i}."), insight())
+        text = path.read_text()
+        shapes.add(text[text.index(writer.NOTE_END):])
+    assert len(shapes) == 1, "the note is not byte-stable across regenerations"
+    assert path.read_text().count("Kept.") == 1

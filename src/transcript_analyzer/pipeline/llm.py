@@ -219,6 +219,12 @@ class LLM:
         return {
             "ok": key_configured and not kill and spent < ceiling,
             "model": self.model,
+            # What each stage will actually run on, so a misconfigured stage is
+            # visible on /health rather than discovered in the ledger.
+            "stage_models": {
+                stage: self.model_for(stage)
+                for stage in sorted(self.cfg.anthropic.stage_models)
+            },
             "key_configured": key_configured,
             "kill_switch": kill,
             "month_spend_usd": round(spent, 4),

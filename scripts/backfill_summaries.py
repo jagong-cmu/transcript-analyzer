@@ -353,7 +353,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--apply", action="store_true",
                    help="Actually rewrite notes. Without it this is a dry run.")
-    p.add_argument("--limit", type=int, default=None, help="Only the newest N notes.")
+    p.add_argument("--limit", type=int, default=None,
+                   help="Stop after the first N eligible notes (newest first).")
     p.add_argument("--force", action="store_true",
                    help="Re-summarize notes that already have a detailed summary.")
     p.add_argument("--lectures-only", action="store_true",

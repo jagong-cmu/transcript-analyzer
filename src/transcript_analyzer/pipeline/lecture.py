@@ -482,6 +482,9 @@ def produce(
         notes = build_study_notes(transcript, insight, cfg, llm)
 
     title = insight.headline or transcript.title
+    # Claimed up front: the markdown below links its own PDF by stem, and the
+    # ladder may have moved that stem off the note's. One claim, both uses.
+    study_target = writer.claim_study_note_path(cfg, note_path, transcript.id)
     dropped_ids: set[str] = set()
     pdf_bytes: Optional[bytes] = None
     pdf_error = ""
@@ -515,10 +518,10 @@ def produce(
         course_code=insight.course_code,
         course_name=insight.course_name,
         transcript_stem=note_path.stem,
-        pdf_name=writer.study_stem(note_path.stem) + ".pdf" if pdf_bytes else "",
+        pdf_name=f"{study_target.stem}.pdf" if pdf_bytes is not None else "",
     )
     study_path = writer.write_study_note(
-        cfg, note_path, transcript.id, study_md, title=title
+        cfg, note_path, transcript.id, study_md, title=title, path=study_target
     )
     pdf_path = None
     if pdf_bytes is not None:

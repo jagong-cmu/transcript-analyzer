@@ -217,7 +217,7 @@ def extract_insight(
     known = known_courses or {}
     system, user = extraction_prompt(transcript, known)
     data = llm.chat_json(
-        SYSTEM, user, schema=INSIGHT_SCHEMA, max_tokens=MAX_TOKENS, stage=stage
+        system, user, schema=INSIGHT_SCHEMA, max_tokens=MAX_TOKENS, stage=stage
     )
     return insight_from_payload(data, transcript, known_courses=known)
 

@@ -178,3 +178,45 @@ def test_moving_onto_our_own_destination_replaces_it(cfg):
 
     moved = writer.move_study_with_note(cfg, old_note, new_note, OURS)
     assert moved is not None and "current" in moved.read_text()
+
+
+def test_the_pdf_link_names_the_stem_that_was_actually_claimed(cfg):
+    """When the ladder moves the study stem, the markdown must link the file
+    that exists — not the name it would have had."""
+    from datetime import date
+
+    from dataclasses import replace
+
+    from transcript_analyzer.models import Insight, Transcript
+    from transcript_analyzer.pipeline import lecture
+
+    note = cfg.vault.insights_path / "2026-09-01 lecture.md"
+    note.write_text(
+        f"---\nsource: pocket\ndate: 2026-09-01\ntranscript_id: {OURS}\n---\n",
+        encoding="utf-8",
+    )
+    # Somebody else already owns the natural study stem.
+    taken = foreign_note(writer.study_note_path_for(cfg, note))
+
+    notes = lecture.study_notes_from_payload(
+        {
+            "overview": "o",
+            "sections": [{"heading": "S", "body": "b",
+                          "anchor": "row reducing a three by three matrix",
+                          "visuals": []}],
+            "key_terms": [], "assessment": [], "background": [], "asr_repairs": [],
+        },
+        "[0:01] row reducing a three by three matrix",
+        cfg,
+    )
+    cfg_no_pdf = replace(cfg, lecture=replace(cfg.lecture, pdf=False))
+    transcript = Transcript(id=OURS, source="pocket", native_id="n", title="t",
+                            date=date(2026, 9, 1), text="x")
+    out = lecture.produce(
+        cfg_no_pdf, transcript, Insight(headline="Lecture"), note, notes=notes
+    )
+
+    assert out.study_path != taken
+    assert "Someone else's" in taken.read_text()
+    # No PDF was rendered, so no PDF is linked — and never a stem we do not own.
+    assert ".pdf" not in out.study_path.read_text()

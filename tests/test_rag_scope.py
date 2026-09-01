@@ -52,3 +52,20 @@ def test_load_scoped_missing_raises(cfg):
         rag._load_scoped_records(cfg, transcript_id="missing")
     with pytest.raises(ValueError, match="has no conversations"):
         rag._load_scoped_records(cfg, category="Ghost")
+
+
+def test_a_fetched_note_carries_the_long_summary_not_the_index_abstract():
+    """The index already showed the abstract; a fetch is where the detail is
+    worth its tokens (and the index is what must stay small)."""
+    from conftest import make_record
+
+    from transcript_analyzer.rag import _render_full
+
+    rec = make_record(summary="Short abstract.")
+    rec = rec.model_copy(update={
+        "detailed_summary": "A long summary with the specifics in it.",
+        "kind": "lecture", "course_code": "21-241", "course_name": "Linear Algebra",
+    })
+    out = _render_full(rec)
+    assert "A long summary with the specifics in it." in out
+    assert "Lecture in 21-241 Linear Algebra" in out
