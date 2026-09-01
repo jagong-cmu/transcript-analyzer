@@ -42,6 +42,25 @@ timeout = 300
 monthly_budget_usd = 15.0
 # Hard cap on API calls in a single run (sync cycle / synthesis pass).
 max_calls_per_run = 80
+# Output cap for the study-notes pass (streamed, so not bound by `timeout`).
+lecture_max_tokens = 32000
+
+# Per-stage model overrides. A stage names a job, not a model. Empty string
+# falls back to `model` above. Known stages: extract (per-transcript insight
+# + kind classification), lecture (study notes and diagrams), backfill (bulk
+# re-summarization), synthesis, ask.
+[anthropic.stage_models]
+lecture = "claude-opus-5"
+backfill = "claude-sonnet-5"
+
+# Per-stage reasoning effort: low | medium | high | xhigh | max.
+# Thinking is on by default on Opus 5 and billed as output, so the stages that
+# only fill in a schema are pinned low. Set "" to send no effort at all, which
+# is required by models that reject the parameter.
+[anthropic.stage_effort]
+extract = "low"
+backfill = "low"
+lecture = "medium"
 
 [quality]
 # Ingest-time junk floor: transcripts shorter than this (chars), or whose
@@ -64,6 +83,20 @@ self_emails = []
 # [[synthesis.studies]]
 # name = "Airport wayfinding research"
 # description = "Intercept interviews and observation sessions with travelers about navigating airports and transit."
+
+[lecture]
+# Study notes + a printable PDF for recordings classified `kind = "lecture"`.
+# Detection is the model's classification alone — there is no course registry;
+# a course binds to the ones already in the vault by its course code.
+enabled = true
+# Render the PDF (needs the Playwright Chromium: pip install -e '.[pdf]' &&
+# playwright install chromium). With this off, or the browser missing, the
+# markdown study notes are still written.
+pdf = true
+# Diagram budget per lecture. Every diagram is reconstructed from speech and
+# is dropped if it does not render — none is ever faked.
+min_visuals = 2
+max_visuals = 5
 
 [calendar]
 # Secret ICS URL for tomorrow's-meeting prep notes (Google Calendar:

@@ -20,8 +20,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Study-note PDFs. Kept optional so the core install, the test suite and CI do
+# not carry a browser: every import of it is lazy and the pipeline falls back
+# to markdown-only study notes when it is absent.
+pdf = [
+    "playwright>=1.49",
+]
 dev = [
     "pytest>=8.0",
+    "playwright>=1.49",
 ]
 
 [project.scripts]

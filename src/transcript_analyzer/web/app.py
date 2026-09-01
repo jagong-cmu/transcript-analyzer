@@ -4,12 +4,14 @@ from __future__ import annotations
 import json
 from collections import defaultdict
 from pathlib import Path
+from typing import Optional
 from urllib.parse import quote, unquote
 
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from markupsafe import Markup
 from starlette.concurrency import run_in_threadpool
 
 from .. import rag
@@ -21,6 +23,7 @@ from ..db import (
     get_conn,
     get_meta,
     get_transcript,
+    lectures,
     set_meta,
     transcripts_in_category,
 )
@@ -28,6 +31,7 @@ from ..obsidian import writer
 from ..pipeline import organize, synthesize
 from ..pipeline.llm import LLM, LLMError
 from ..pipeline.synthesize import LAST_RUN_KEY
+from ..render.study import markdown_to_html
 from . import synth_reader
 
 BASE = Path(__file__).resolve().parent
@@ -47,7 +51,19 @@ def obsidian_uri(note_path: str) -> str:
     return f"obsidian://open?vault={quote(cfg.vault.name)}&file={quote(str(rel.with_suffix('')))}"
 
 
+def summary_html(text: str) -> Markup:
+    """A detailed summary as HTML.
+
+    The note body is markdown now that summaries are long — headings, lists,
+    emphasis — and the dashboard shares the study-note renderer rather than
+    growing a second one. That renderer escapes before it re-admits any
+    markup, which is what makes marking the result safe here.
+    """
+    return Markup(markdown_to_html(text))
+
+
 templates.env.filters["obsidian"] = obsidian_uri
+templates.env.filters["summary"] = summary_html
 
 
 def _cats():
@@ -364,6 +380,7 @@ def transcript(request: Request, tid: str):
     has_audio = (
         writer.audio_path_for(cfg, Path(rec.note_path)).exists() if rec.note_path else False
     )
+    study_md, study_pdf = _study_paths(rec)
     transcript_lines = parse_transcript_lines(rec.transcript_text)
     has_timestamps = any(row["start_sec"] is not None for row in transcript_lines)
     return templates.TemplateResponse(
@@ -375,8 +392,58 @@ def transcript(request: Request, tid: str):
             "note_categories": note_cats,
             "obsidian_url": obsidian_uri(rec.note_path),
             "has_audio": has_audio,
+            "has_study_pdf": study_pdf is not None,
+            "study_obsidian_url": obsidian_uri(str(study_md)) if study_md else "",
             "transcript_lines": transcript_lines,
             "has_timestamps": has_timestamps,
+        },
+    )
+
+
+def _study_paths(rec) -> tuple[Optional[Path], Optional[Path]]:
+    """(study note, rendered PDF) for a record, each only when it exists.
+
+    Existence is the whole test: study notes are written only for lectures,
+    and the PDF only when the renderer produced one, so asking the filesystem
+    keeps the dashboard honest about what the vault actually holds.
+    """
+    if not rec.note_path:
+        return None, None
+    md = writer.study_note_path_for(cfg, Path(rec.note_path))
+    pdf = writer.study_pdf_for(md)
+    return (md if md.exists() else None), (pdf if pdf.exists() else None)
+
+
+@app.get("/study/{tid}")
+def study_pdf(tid: str):
+    """Serve a lecture's rendered study-notes PDF."""
+    with get_conn(cfg.db_path) as conn:
+        rec = get_transcript(conn, tid)
+    if rec is None:
+        return HTMLResponse("Not found", status_code=404)
+    _md, pdf = _study_paths(rec)
+    if pdf is None:
+        return HTMLResponse("No study notes", status_code=404)
+    return FileResponse(str(pdf), media_type="application/pdf", filename=pdf.name)
+
+
+@app.get("/lectures", response_class=HTMLResponse)
+def lectures_page(request: Request):
+    """Every lecture, grouped by course, with its study notes."""
+    with get_conn(cfg.db_path) as conn:
+        recs = lectures(conn)
+    by_course: dict[str, list] = defaultdict(list)
+    for rec in recs:
+        label = " · ".join(p for p in (rec.course_code, rec.course_name) if p)
+        _md, pdf = _study_paths(rec)
+        by_course[label or "Uncategorized"].append({"rec": rec, "has_pdf": pdf is not None})
+    return templates.TemplateResponse(
+        request,
+        "lectures.html",
+        {
+            "categories": _cats(),
+            "courses": sorted(by_course.items()),
+            "total": len(recs),
         },
     )
 

@@ -206,12 +206,12 @@ def study_html(
 
     if notes.overview:
         parts.append("<h2>Overview</h2>")
-        parts.append(_markdownish(notes.overview))
+        parts.append(markdown_to_html(notes.overview))
 
     n = 0
     for section in notes.sections:
         parts.append(f"<h2>{e(section.heading)}</h2>")
-        parts.append(_markdownish(section.body))
+        parts.append(markdown_to_html(section.body))
         for v in section.visuals:
             n += 1
             parts.append(_visual_html(v, n))
@@ -235,7 +235,7 @@ def study_html(
         )
         for b in notes.background:
             parts.append(f"<h3>{e(b.heading)}</h3>")
-            parts.append(_markdownish(b.body))
+            parts.append(markdown_to_html(b.body))
         parts.append("</section>")
 
     if notes.asr_repairs:
@@ -277,7 +277,7 @@ def _visual_html(v: Visual, n: int) -> str:
 _INLINE_CODE = "`"
 
 
-def _markdownish(text: str) -> str:
+def markdown_to_html(text: str) -> str:
     """The small markdown subset the model actually emits, as HTML.
 
     Deliberately not a markdown library: the study-note body is headings,
