@@ -18,17 +18,20 @@ from typing import Iterable, Optional
 
 from .config import Config, load_config
 from .connectors import pocket
+from .courses import index_courses
 from .db import (
     canonical_note_path,
     get_conn,
     get_meta,
     get_sync_hash,
     get_sync_note_path,
+    known_course_rows,
     record_sync,
     set_meta,
 )
-from .models import Transcript
+from .models import Insight, Transcript
 from .obsidian import writer
+from .pipeline import lecture
 from .pipeline.indexer import index_note
 from .pipeline.insights import extract_insight
 from .pipeline.llm import LLM, LLMBudgetError, LLMKillSwitchError
@@ -164,6 +167,41 @@ def _count_failure(cfg: Config) -> int:
     return total
 
 
+def _known_courses(cfg: Config) -> dict:
+    """The courses the index already holds, so a lecture rejoins its own.
+
+    Read fresh per transcript rather than once per run: a sync pass that
+    ingests week 1 and week 2 of the same course in one go must let the second
+    bind to the first (see courses.py).
+    """
+    with get_conn(cfg.db_path) as conn:
+        return index_courses(known_course_rows(conn))
+
+
+def _study_notes_for(
+    cfg: Config, transcript: Transcript, insight: Insight, llm: LLM, note_path: Path
+):
+    """The lecture profile, or None when this is not a lecture we can serve.
+
+    Budget and kill-switch errors PROPAGATE — they mean stop, and the caller's
+    handler stops the whole pass. Anything else is contained: a note with a
+    detailed summary and no study notes is still the deliverable, and the
+    alternative is losing the transcript entirely over a diagram.
+    """
+    if not (insight.is_lecture and cfg.lecture.enabled):
+        return None
+    try:
+        return lecture.produce(cfg, transcript, insight, note_path, llm)
+    except (LLMKillSwitchError, LLMBudgetError):
+        raise
+    except Exception as e:  # noqa: BLE001 - study notes must not cost the note
+        _log.warning(
+            "study notes failed for %s (%s); writing the note without them",
+            note_path.name, e,
+        )
+        return None
+
+
 def process_transcript(
     cfg: Config,
     transcript: Transcript,
@@ -171,7 +209,9 @@ def process_transcript(
     *,
     dry_run: bool = False,
 ) -> dict:
-    insight = extract_insight(transcript, cfg, llm=llm)
+    insight = extract_insight(
+        transcript, cfg, llm=llm, known_courses=_known_courses(cfg)
+    )
     display = compose_display_title(
         insight.headline or transcript.title, transcript.date
     )
@@ -179,7 +219,10 @@ def process_transcript(
         "id": transcript.id,
         "title": display,
         "source": transcript.source,
+        "kind": insight.kind,
         "note_path": None,
+        "study_notes": None,
+        "study_pdf": None,
     }
     if dry_run:
         return result
@@ -189,20 +232,40 @@ def process_transcript(
     with get_conn(cfg.db_path) as conn:
         prev_path = get_sync_note_path(conn, transcript.source, transcript.native_id)
 
-    # A re-worded headline renames the note; carry its recording across first,
-    # so the download below finds the file the vault already has.
+    # A re-worded headline renames the note; carry its recording and its study
+    # notes across first, so nothing below writes a second copy beside them.
     prev_note = _owned_prev_note(prev_path, transcript)
     prospective = writer.note_path_for(cfg, transcript, insight)
     if prev_note and canonical_note_path(prev_note) != canonical_note_path(prospective):
         writer.move_audio_with_note(cfg, prev_note, prospective, transcript.id)
+        writer.move_study_with_note(cfg, prev_note, prospective, transcript.id)
 
     # Download the recording's audio into the vault (Pocket only) and embed it.
     audio_name, audio_still_owed = _maybe_download_audio(cfg, transcript, prospective)
 
+    # Lectures get study notes and a PDF, written under Study Notes/ against
+    # the stem this note is about to take.
+    study = _study_notes_for(cfg, transcript, insight, llm, prospective)
+    if study is not None:
+        result["study_notes"] = str(study.study_path) if study.study_path else None
+        result["study_pdf"] = str(study.pdf_path) if study.pdf_path else None
+        # The study-notes pass reads the whole lecture at the highest-effort
+        # model in the system, so its overview is the better detailed summary.
+        if study.notes.overview:
+            insight = insight.model_copy(
+                update={"detailed_summary": study.notes.overview}
+            )
+
     # The claim above is the ONE decision: the download wrote the mp3 against
     # it and the body embeds that name, so the note has to land on it too.
     note_path = writer.write_note(
-        cfg, transcript, insight, audio_name=audio_name, path=prospective
+        cfg,
+        transcript,
+        insight,
+        audio_name=audio_name,
+        path=prospective,
+        study_stem_name=study.stem if study else None,
+        asr_repairs=study.notes.asr_repairs if study else None,
     )
     result["note_path"] = str(note_path)
 

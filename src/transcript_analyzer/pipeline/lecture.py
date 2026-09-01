@@ -24,7 +24,9 @@ Three constraints shape everything here:
 from __future__ import annotations
 
 import logging
-from typing import Iterable, Optional
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional
 
 from ..config import Config
 from ..models import (
@@ -36,6 +38,9 @@ from ..models import (
     Transcript,
     Visual,
 )
+from ..obsidian import writer
+from ..render import pdf as pdf_render
+from ..render import study as study_render
 from .citations import quote_matches
 from .llm import LLM
 
@@ -429,6 +434,133 @@ def _looks_like_mermaid(source: str) -> bool:
     return False
 
 
+# ---------------------------------------------------------------- production
+
+
+@dataclass
+class StudyOutcome:
+    """What one lecture's study-notes pass actually produced."""
+
+    notes: StudyNotes
+    study_path: Optional[Path] = None
+    pdf_path: Optional[Path] = None
+    dropped_by_renderer: list[str] = field(default_factory=list)
+    pdf_error: str = ""
+
+    @property
+    def stem(self) -> str:
+        """The wikilink name the transcript note points at, or "" if nothing was written."""
+        return self.study_path.stem if self.study_path else ""
+
+
+def produce(
+    cfg: Config,
+    transcript: Transcript,
+    insight: Insight,
+    note_path: Path,
+    llm: Optional[LLM] = None,
+    *,
+    notes: Optional[StudyNotes] = None,
+) -> StudyOutcome:
+    """Generate, render, and write one lecture's study notes and PDF.
+
+    ORDER MATTERS, twice over.
+
+    The PDF is rendered BEFORE the markdown is written, because the browser is
+    what decides which diagrams are real: the markdown is then pruned to the
+    same set, so the two renderings of one lecture never disagree about which
+    diagrams exist.
+
+    The markdown study note is written BEFORE the PDF bytes, because it is the
+    only thing that can carry `transcript_id` at that stem — a PDF has no
+    frontmatter to prove whose it is, exactly like an mp3 in Attachments/.
+
+    `notes` lets a caller (the backfill) supply an already-generated payload
+    instead of paying for the API call again.
+    """
+    if notes is None:
+        notes = build_study_notes(transcript, insight, cfg, llm)
+
+    title = insight.headline or transcript.title
+    dropped_ids: set[str] = set()
+    pdf_bytes: Optional[bytes] = None
+    pdf_error = ""
+
+    if cfg.lecture.pdf and notes.sections:
+        html = study_render.study_html(
+            notes,
+            title=title,
+            when=transcript.date,
+            course_code=insight.course_code,
+            course_name=insight.course_name,
+            source_label=transcript.source,
+        )
+        try:
+            result = pdf_render.render_pdf(html, cfg.data_dir)
+        except pdf_render.PdfRenderError as e:
+            # The notes are still worth having; only the PDF is lost, and the
+            # markdown keeps its diagram specs because Obsidian renders (and
+            # validates) mermaid itself.
+            pdf_error = str(e)
+            _log.warning("study-notes PDF not rendered for %s: %s", note_path.name, e)
+        else:
+            pdf_bytes = result.pdf
+            dropped_ids = result.dropped_ids
+            notes = prune_visuals(notes, dropped_ids)
+
+    study_md = study_render.study_markdown(
+        notes,
+        title=title,
+        when=transcript.date,
+        course_code=insight.course_code,
+        course_name=insight.course_name,
+        transcript_stem=note_path.stem,
+        pdf_name=writer.study_stem(note_path.stem) + ".pdf" if pdf_bytes else "",
+    )
+    study_path = writer.write_study_note(
+        cfg, note_path, transcript.id, study_md, title=title
+    )
+    pdf_path = None
+    if pdf_bytes is not None:
+        pdf_path = writer.write_study_pdf(study_path, transcript.id, pdf_bytes)
+
+    return StudyOutcome(
+        notes=notes,
+        study_path=study_path,
+        pdf_path=pdf_path,
+        dropped_by_renderer=sorted(dropped_ids),
+        pdf_error=pdf_error,
+    )
+
+
+def prune_visuals(notes: StudyNotes, dropped_ids: set[str]) -> StudyNotes:
+    """Drop the visuals the renderer refused, keeping the counts honest.
+
+    `study_html` numbers figures viz1, viz2, … across the sections in order,
+    so the same walk maps an id back to the visual that produced it.
+    """
+    if not dropped_ids:
+        return notes
+    sections: list[StudySection] = []
+    n = 0
+    removed = 0
+    for section in notes.sections:
+        kept: list[Visual] = []
+        for v in section.visuals:
+            n += 1
+            if f"viz{n}" in dropped_ids:
+                removed += 1
+                continue
+            kept.append(v)
+        sections.append(section.model_copy(update={"visuals": kept}))
+    return notes.model_copy(
+        update={
+            "sections": sections,
+            "dropped_visuals": notes.dropped_visuals + removed,
+        }
+    )
+
+
 def _as_dicts(v) -> list[dict]:
     return [x for x in v if isinstance(x, dict)] if isinstance(v, list) else []
 
@@ -439,7 +571,3 @@ def _as_strs(v) -> list[str]:
 
 def _text(v) -> str:
     return str(v or "").strip()
-
-
-def visuals_of(notes: StudyNotes) -> Iterable[Visual]:
-    return notes.visuals

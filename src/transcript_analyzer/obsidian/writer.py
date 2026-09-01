@@ -733,7 +733,12 @@ def write_note(
             "leaving anything at that stem to the note that owns it",
             path,
         )
+        # Both the recording and the study notes were written against the
+        # stem that was just taken, so neither is this note's to name any
+        # more: the links are dropped rather than pointing at another
+        # transcript's files. They stay orphans until this one changes again.
         audio_name = None
+        study_stem_name = None
         path = note_path_for(cfg, transcript, insight)
     ours = owns_note(path, transcript.id)
     tail = _owner_tail(path) if ours else ""

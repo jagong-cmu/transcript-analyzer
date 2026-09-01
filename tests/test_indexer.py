@@ -340,7 +340,7 @@ def test_ordinary_multiline_summary_is_unchanged(cfg):
         date=_date(2026, 7, 1),
         text="Angela: hello.",
     )
-    insight = Insight(headline="Plain", summary=summary)
+    insight = Insight(headline="Plain", detailed_summary=summary)
     p = write(
         cfg.vault.insights_path / "2026-07-01 plain.md",
         writer.render_note(transcript, insight),
@@ -348,7 +348,7 @@ def test_ordinary_multiline_summary_is_unchanged(cfg):
 
     rec = indexer.parse_note(p)
     assert rec is not None
-    assert rec.summary == summary
+    assert rec.detailed_summary == summary
     assert rec.transcript_text == "Angela: hello."
 
 
@@ -408,13 +408,15 @@ def test_a_summary_line_opening_with_a_tag_or_rank_is_untouched(cfg):
     )
     p = write(
         cfg.vault.insights_path / "2026-07-01 tags.md",
-        writer.render_note(transcript, Insight(headline="Tags", summary=summary)),
+        writer.render_note(
+            transcript, Insight(headline="Tags", detailed_summary=summary)
+        ),
     )
 
     rec = indexer.parse_note(p)
     assert rec is not None
     # '#### ' IS a heading shape, so it alone is escaped; the rest are verbatim.
-    assert rec.summary == summary.replace("#### four", "\\#### four")
+    assert rec.detailed_summary == summary.replace("#### four", "\\#### four")
     assert "\\#hiring" not in p.read_text(encoding="utf-8")
     assert "\\#1" not in p.read_text(encoding="utf-8")
     assert rec.transcript_text == "Angela: hello."
