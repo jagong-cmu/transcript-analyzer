@@ -96,8 +96,8 @@ def _rename_with_audio(cfg, old: Path, new: Path, transcript_id: str, *, dry_run
         return new
     new.parent.mkdir(parents=True, exist_ok=True)
     old_audio = writer.audio_path_for(cfg, old)
-    old.rename(new)
     new_audio = writer.move_audio_with_note(cfg, old, new, transcript_id)
+    old.rename(new)
     if new_audio is not None:
         # Fix embed reference inside the note if present.
         text = new.read_text(encoding="utf-8")

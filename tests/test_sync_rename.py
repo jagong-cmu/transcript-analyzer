@@ -6,6 +6,7 @@ did not exist, so download_audio's "already downloaded" short-circuit missed
 and the whole recording was fetched again.
 """
 import logging
+import re
 from dataclasses import replace
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -14,6 +15,16 @@ from transcript_analyzer import sync
 from transcript_analyzer.db import get_conn, record_sync
 from transcript_analyzer.models import Insight, Transcript
 from transcript_analyzer.obsidian import writer
+
+
+FOREIGN_NOTE = """---
+source: granola
+date: 2026-07-01
+transcript_id: someone-else
+---
+
+# Not ours
+"""
 
 
 def _pocket_cfg(cfg):
@@ -108,9 +119,9 @@ def test_unchanged_headline_leaves_the_recording_alone(cfg, monkeypatch):
 
 
 def test_move_audio_with_note_replaces_a_stale_file_at_a_stem_we_own(cfg):
-    """A recording at the destination is ours to replace when the note there is."""
+    """Both ends ours: the recording moves, and the stale file gives way."""
     transcript = _transcript()
-    old_note = cfg.vault.insights_path / "2026-07-01 old.md"
+    old_note = writer.write_note(cfg, transcript, Insight(headline="Old"))
     new_note = writer.write_note(cfg, transcript, Insight(headline="New"))
     old_audio = writer.audio_path_for(cfg, old_note)
     new_audio = writer.audio_path_for(cfg, new_note)
@@ -127,6 +138,30 @@ def test_move_audio_with_note_replaces_a_stale_file_at_a_stem_we_own(cfg):
     assert writer.move_audio_with_note(cfg, old_note, new_note, transcript.id) is None
 
 
+def test_a_recording_we_cannot_prove_is_ours_is_never_moved_off_its_stem(cfg, caplog):
+    """The SOURCE needs the same proof as the destination.
+
+    A stem another note took — while this transcript's recording was still
+    downloading, or by a retitle pass on the live vault — holds THEIR mp3.
+    Moving it leaves their note with a dangling embed and their recording gone.
+    """
+    transcript = _transcript()
+    stranger_note = cfg.vault.insights_path / "2026-07-01 taken.md"
+    stranger_note.write_text(FOREIGN_NOTE, encoding="utf-8")
+    stranger_audio = writer.audio_path_for(cfg, stranger_note)
+    stranger_audio.parent.mkdir(parents=True, exist_ok=True)
+    stranger_audio.write_bytes(b"stranger-recording")
+    ours = writer.write_note(cfg, transcript, Insight(headline="Ours"))
+
+    with caplog.at_level(logging.WARNING, logger="transcript_analyzer.obsidian.writer"):
+        moved = writer.move_audio_with_note(cfg, stranger_note, ours, transcript.id)
+
+    assert moved is None
+    assert stranger_audio.read_bytes() == b"stranger-recording"
+    assert not writer.audio_path_for(cfg, ours).exists()
+    assert str(stranger_audio) in caplog.text
+
+
 def test_a_recording_at_a_stem_we_cannot_prove_is_ours_is_never_unlinked(cfg, caplog):
     """The owner renamed the note in Obsidian; the attachment stayed behind.
 
@@ -136,7 +171,7 @@ def test_a_recording_at_a_stem_we_cannot_prove_is_ours_is_never_unlinked(cfg, ca
     note at that stem can claim it.
     """
     transcript = _transcript()
-    old_note = cfg.vault.insights_path / "2026-07-01 old.md"
+    old_note = writer.write_note(cfg, transcript, Insight(headline="Old"))
     target = cfg.vault.insights_path / "2026-07-01 pricing-deck-review.md"
     old_audio = writer.audio_path_for(cfg, old_note)
     target_audio = writer.audio_path_for(cfg, target)
@@ -155,7 +190,7 @@ def test_a_recording_at_a_stem_we_cannot_prove_is_ours_is_never_unlinked(cfg, ca
 
 def test_a_recording_whose_note_is_unreadable_is_never_unlinked(cfg, monkeypatch):
     transcript = _transcript()
-    old_note = cfg.vault.insights_path / "2026-07-01 old.md"
+    old_note = writer.write_note(cfg, transcript, Insight(headline="Old"))
     target = writer.write_note(cfg, transcript, Insight(headline="Target"))
     old_audio = writer.audio_path_for(cfg, old_note)
     target_audio = writer.audio_path_for(cfg, target)
@@ -177,16 +212,6 @@ def test_a_recording_whose_note_is_unreadable_is_never_unlinked(cfg, monkeypatch
     assert old_audio.read_bytes() == b"our-recording"
 
 
-FOREIGN_NOTE = """---
-source: granola
-date: 2026-07-01
-transcript_id: someone-else
----
-
-# Not ours
-"""
-
-
 def test_a_path_taken_during_the_download_keeps_the_body_and_the_disk_in_step(
     cfg, monkeypatch
 ):
@@ -194,8 +219,10 @@ def test_a_path_taken_during_the_download_keeps_the_body_and_the_disk_in_step(
 
     The claim is filesystem-dependent and the download between the two uses of
     it can run for minutes. Re-deciding afterwards put the note on the
-    disambiguated stem while its '![[…]]' embed — and the mp3 — stayed on the
-    original one, so the player silently disappeared from that note.
+    disambiguated stem while its '![[…]]' embed pointed at the original one, so
+    the player silently disappeared from that note. The re-claim still has to
+    happen — and the stem's recording now belongs to whoever took the stem, so
+    it stays put and this note is written with no embed at all.
     """
     cfg = _pocket_cfg(cfg)
     transcript = _transcript()
@@ -208,7 +235,7 @@ def test_a_path_taken_during_the_download_keeps_the_body_and_the_disk_in_step(
         note_path.write_text(FOREIGN_NOTE, encoding="utf-8")
         audio = writer.audio_path_for(cfg_, note_path)
         audio.parent.mkdir(parents=True, exist_ok=True)
-        audio.write_bytes(b"our-recording")
+        audio.write_bytes(b"stranger-recording")
         return audio.name
 
     monkeypatch.setattr(sync, "_maybe_download_audio", download_while_someone_takes_the_path)
@@ -217,10 +244,14 @@ def test_a_path_taken_during_the_download_keeps_the_body_and_the_disk_in_step(
     note_path = Path(result["note_path"])
 
     assert claimed.read_text(encoding="utf-8") == FOREIGN_NOTE, "wrote over a note that is not ours"
-    assert note_path != claimed
-    audio = writer.audio_path_for(cfg, note_path)
-    assert audio.exists() and audio.read_bytes() == b"our-recording"
-    assert f"![[{audio.name}]]" in note_path.read_text(encoding="utf-8")
+    assert note_path != claimed, "the re-claim did not happen"
+    taken_audio = writer.audio_path_for(cfg, claimed)
+    assert taken_audio.read_bytes() == b"stranger-recording", "took a recording that is not ours"
+
+    # Every embed the note carries names a file that is actually there.
+    body = note_path.read_text(encoding="utf-8")
+    for name in re.findall(r"!\[\[([^\]]+)\]\]", body):
+        assert (writer.attachments_dir(cfg) / name).exists(), name
 
 
 def _granola_transcript() -> Transcript:

@@ -188,3 +188,33 @@ def test_a_stem_we_do_own_keeps_being_claimed_recording_and_all(cfg):
     assert path.name == BASE_NAME
     assert writer.write_note(cfg, transcript, _insight()) == path
     assert audio.read_bytes() == b"our-recording"
+
+
+NOTE_WITH_RECORDING = NOTE_TO_RETITLE.replace(
+    "## Summary",
+    "## Recording\n![[2026-07-01 raw-source-title.mp3]]\n\n## Summary",
+)
+
+
+def test_retitle_carries_the_recording_and_its_embed_to_the_new_name(cfg, monkeypatch):
+    """The recording still follows a note this transcript owns.
+
+    Proving the SOURCE stem means the move has to happen while the note is
+    still there to prove it — before the rename, not after.
+    """
+    monkeypatch.setattr(retitle_notes, "load_config", lambda: cfg)
+    old = cfg.vault.insights_path / "2026-07-01 raw-source-title.md"
+    old.write_text(NOTE_WITH_RECORDING, encoding="utf-8")
+    old_audio = writer.audio_path_for(cfg, old)
+    old_audio.parent.mkdir(parents=True, exist_ok=True)
+    old_audio.write_bytes(b"our-recording")
+
+    result = retitle_notes.retitle(cheap=True)
+
+    assert result["updated"] == 1 and result["errors"] == 0
+    moved = cfg.vault.insights_path / BASE_NAME
+    assert moved.exists() and not old.exists()
+    new_audio = writer.audio_path_for(cfg, moved)
+    assert new_audio.read_bytes() == b"our-recording"
+    assert not old_audio.exists(), "the recording was orphaned under the old stem"
+    assert f"![[{new_audio.name}]]" in moved.read_text(encoding="utf-8")

@@ -93,14 +93,24 @@ def move_audio_with_note(
     Returns the new audio path if something was moved.
 
     An mp3 carries no frontmatter, so the note at its stem is the only thing
-    that can claim it: a recording already sitting at the destination is ours
-    to replace only when the note there is provably ours. Otherwise — an
-    attachment the vault owner still embeds from a note they renamed in
-    Obsidian — nothing is unlinked; the move is skipped and the orphan named.
+    that can claim it — and that has to hold at BOTH ends of the move. The
+    recording is ours to take only when the note at the source stem is ours,
+    and a recording already sitting at the destination is ours to replace only
+    when the note there is ours. Otherwise — an attachment the vault owner
+    still embeds from a note they renamed in Obsidian, or a stem another note
+    took while this transcript's recording was still downloading — nothing is
+    moved or unlinked; the move is skipped and the file named.
     """
     old_audio = audio_path_for(cfg, old_note)
     new_audio = audio_path_for(cfg, new_note)
     if old_audio.resolve() == new_audio.resolve() or not old_audio.exists():
+        return None
+    if not owns_note(old_note, transcript_id):
+        _log.warning(
+            "leaving %s where it is: no note at that stem proves the recording "
+            "is this transcript's to move (orphan, clean up by hand)",
+            old_audio,
+        )
         return None
     if new_audio.exists() and not owns_note(new_note, transcript_id):
         _log.warning(
@@ -373,8 +383,11 @@ def write_note(
     longer sits on. One claim, threaded through both.
 
     If something else did take that path while the recording streamed, the
-    claim is redone AND the recording follows it, so the name in the body and
-    the file on disk still cannot disagree — and nothing unowned is written over.
+    claim is redone and the recording follows only if it is still ours to move
+    — a stem another note now owns keeps its mp3, and this note is written
+    without an embed rather than with one naming a file it does not own. Either
+    way the name in the body and the file on disk cannot disagree, and nothing
+    unowned is written over.
     """
     if path is None:
         path = note_path_for(cfg, transcript, insight)
