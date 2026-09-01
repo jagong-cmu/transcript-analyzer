@@ -58,6 +58,7 @@ from transcript_analyzer.pipeline import insights as insights_mod  # noqa: E402
 from transcript_analyzer.pipeline import lecture as lecture_mod  # noqa: E402
 from transcript_analyzer.pipeline.indexer import extract_transcript, index_note  # noqa: E402
 from transcript_analyzer.pipeline.llm import LLM, LLMError  # noqa: E402
+from transcript_analyzer.titles import clean_headline  # noqa: E402
 
 BACKFILL_STAGE = "backfill"
 
@@ -109,8 +110,14 @@ def _transcript_for(rec: NoteRecord, path: Path) -> Optional[Transcript]:
 
 
 def _headline_of(rec: NoteRecord) -> str:
-    """The note's current headline — the display title minus its date suffix."""
-    return rec.title.rsplit(",", 1)[0].strip() if "," in rec.title else rec.title
+    """The note's current headline — its indexed title without the date.
+
+    Through `clean_headline`, the one definition that composes and strips that
+    suffix: splitting on the last comma looks equivalent and is not, because a
+    headline may contain commas of its own ("Pricing chat with Angela, July
+    1st, 2026" -> "Pricing chat with Angela, July 1st").
+    """
+    return clean_headline(rec.title)
 
 
 def _insight_for(rec: NoteRecord, data: dict, transcript: Transcript, known: dict) -> Insight:
