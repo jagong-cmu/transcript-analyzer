@@ -252,11 +252,13 @@ def process_transcript(
         writer.move_audio_with_note(cfg, prev_note, prospective, transcript.id)
         writer.move_study_with_note(cfg, prev_note, prospective, transcript.id)
 
-    # Download the recording's audio into the vault (Pocket only) and embed it.
-    audio_name, audio_still_owed = _maybe_download_audio(cfg, transcript, prospective)
-
     # Lectures get study notes and a PDF, written under Study Notes/ against
-    # the stem this note is about to take.
+    # the stem this note is about to take. This runs BEFORE the download on
+    # purpose: the pass can propagate (a truncated response is retried, not
+    # absorbed), and a failure after the download would strand an mp3 at a
+    # stem no note ever occupies — which makes `claimable_stem` refuse that
+    # stem forever after and pushes every retry one rung up the ladder,
+    # re-downloading the recording each cycle.
     study = _study_notes_for(cfg, transcript, insight, llm, prospective)
     if study is not None:
         result["study_notes"] = str(study.study_path) if study.study_path else None
@@ -268,20 +270,31 @@ def process_transcript(
                 update={"detailed_summary": study.notes.overview}
             )
 
+    # Download the recording's audio into the vault (Pocket only) and embed it.
+    audio_name, audio_still_owed = _maybe_download_audio(cfg, transcript, prospective)
+
     # The claim above is the ONE decision: the download wrote the mp3 against
     # it and the body embeds that name, so the note has to land on it too.
+    # `previous` is what a rename carries across — the owner's tail, their
+    # ticked boxes, the study link — because the destination stem is empty
+    # until this write lands.
     note_path = writer.write_note(
         cfg,
         transcript,
         insight,
         audio_name=audio_name,
         path=prospective,
+        previous=prev_note,
         study_stem_name=study.stem if study else None,
         has_study_pdf=bool(study and study.pdf_path),
         asr_repairs=study.notes.asr_repairs if study else None,
     )
     result["note_path"] = str(note_path)
 
+    # STRICTLY after the write: the new note now provably carries what the old
+    # one held, so removing the old one loses nothing. A failure between the
+    # two leaves an orphan to clean up by hand, which this vault can recover
+    # from — a delete before the write is not recoverable at all.
     if prev_note and _is_stale_note(prev_note, note_path, transcript.id):
         try:
             os.remove(prev_note)

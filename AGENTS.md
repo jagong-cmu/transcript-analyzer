@@ -118,6 +118,12 @@ across the Python versions `pyproject` declares (3.10–3.12) — a change has t
   That lives in `write_note`, not in its callers, because it is the only place that knows which
   path was FINALLY claimed — a lecture pass that is off, skipped or contained must not make the
   note claim study notes are gone while the dashboard still serves them.
+  A RENAME writes to a stem that does not exist yet, so every one of those carry-acrosses would
+  find nothing there: `write_note(previous=…)` names the note being renamed away from, and
+  `writer._carry_source` picks whichever of destination-then-previous `owns_note` proves —
+  `previous` is a hint, never a permission. sync must therefore write the new note BEFORE
+  deleting the old one; reversing that order loses the tail, the ticks and the study link with
+  nothing left to recover them from.
 - **A diagram renders or it is dropped.** The transcript has no visual channel, so every
   diagram is reconstructed from speech. `render/pdf.py` validates each spec in the same page it
   is about to print (`mermaid.parse`, KaTeX with `throwOnError`) and removes the whole figure —
@@ -125,6 +131,15 @@ across the Python versions `pyproject` declares (3.10–3.12) — a change has t
   markdown so the two renderings never disagree. Nothing is ever drawn to stand in for a failed
   diagram. The PDF is rendered BEFORE the markdown is written for exactly that reason, and the
   markdown is written BEFORE the PDF bytes because it is the ownership proof for the stem.
+- **An unattended pass must not leave half-state a retry cannot undo.** `sync.process_transcript`
+  runs the lecture pass BEFORE `_maybe_download_audio` because `_study_notes_for` propagates a
+  truncated response (`LLMResponseError`) rather than absorbing it: failing after the download
+  would strand an mp3 at a stem no note ever occupies, and `claimable_stem` then refuses that
+  stem forever, so every retry lands one rung further up `_claim_ladder` and re-fetches the
+  whole recording. Order side effects so the propagating step comes first. The same rule makes
+  `LLMResponseError` a PER-NOTE failure in `scripts/backfill_summaries.py` — only the kill
+  switch and the budget end a run, since a `--batch` run has already been billed for every
+  payload it would discard.
 - **Models and effort are per STAGE, not global.** `LLM.create/stream/chat_json` take
   `stage=` and resolve the model and `output_config.effort` from
   `[anthropic.stage_models]` / `[anthropic.stage_effort]`; `_record` prices the model that

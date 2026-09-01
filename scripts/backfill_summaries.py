@@ -57,7 +57,11 @@ from transcript_analyzer.pipeline import batch as batch_api  # noqa: E402
 from transcript_analyzer.pipeline import insights as insights_mod  # noqa: E402
 from transcript_analyzer.pipeline import lecture as lecture_mod  # noqa: E402
 from transcript_analyzer.pipeline.indexer import extract_transcript, index_note  # noqa: E402
-from transcript_analyzer.pipeline.llm import LLM, LLMError  # noqa: E402
+from transcript_analyzer.pipeline.llm import (  # noqa: E402
+    LLM,
+    LLMError,
+    LLMResponseError,
+)
 from transcript_analyzer.titles import clean_headline  # noqa: E402
 
 BACKFILL_STAGE = "backfill"
@@ -326,6 +330,13 @@ def backfill(
                 cfg, rec, path, transcript, insight, llm,
                 study_notes=study_notes, backup_dir=backup_dir,
             )
+        except LLMResponseError as e:
+            # Truncated or unparseable output is one NOTE's problem, not the
+            # run's. Stopping here would discard every remaining payload a
+            # --batch run has already been billed for.
+            print(f"  ! {path.name}: {e}", file=sys.stderr)
+            failed += 1
+            continue
         except LLMError as e:
             print(f"[backfill] STOPPING: {e}", file=sys.stderr)
             failed += 1

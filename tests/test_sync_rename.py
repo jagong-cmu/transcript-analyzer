@@ -620,3 +620,125 @@ def test_study_notes_follow_a_retitle(cfg, monkeypatch):
     moved = writer.study_note_path_for(cfg, new_note)
     assert moved.exists() and not study.exists()
     assert writer.study_pdf_for(moved).read_bytes() == b"%PDF ours"
+
+
+def test_a_retitle_carries_the_owners_content_onto_the_new_note(cfg, monkeypatch):
+    """A rename writes to an empty stem, then deletes the old note.
+
+    Everything the owner added lives at the OLD stem until that delete, so a
+    regeneration that only ever looked at the destination found nothing and
+    the rename silently destroyed the hand-typed tail, reopened every ticked
+    commitment, and dropped the study link the same rename had just moved.
+    """
+    transcript = _transcript()
+    old_note = writer.write_note(
+        cfg, transcript,
+        Insight(headline="Old lecture name", summary="Old.",
+                action_items=["Send the deck", "Book the follow-up"]),
+    )
+    study = writer.write_study_note(cfg, old_note, transcript.id, "notes")
+    writer.write_study_pdf(study, transcript.id, b"%PDF ours")
+
+    # The owner ticks a commitment and types their own notes below the marker.
+    text = old_note.read_text(encoding="utf-8").replace(
+        "- [ ] Send the deck", "- [x] Send the deck"
+    )
+    old_note.write_text(
+        text + "\n## My own notes\nAngela sounded unconvinced.\n", encoding="utf-8"
+    )
+    with get_conn(cfg.db_path) as conn:
+        record_sync(conn, transcript.source, transcript.native_id, "oldhash",
+                    str(old_note), datetime.now(timezone.utc).isoformat())
+
+    new_insight = Insight(
+        headline="Row reducing a 3x3 matrix", summary="New.",
+        action_items=["Send the deck", "Book the follow-up"],
+    )
+    monkeypatch.setattr(sync, "extract_insight", lambda *a, **k: new_insight)
+    res = sync.process_transcript(cfg, transcript, llm=None)
+
+    new_note = Path(res["note_path"])
+    assert new_note != old_note and not old_note.exists()
+    body = new_note.read_text(encoding="utf-8")
+
+    assert "Angela sounded unconvinced." in body, "the owner's tail was destroyed"
+    assert "- [x] Send the deck" in body, "a closed commitment was reopened"
+    assert "- [ ] Book the follow-up" in body
+    moved = writer.study_note_path_for(cfg, new_note)
+    assert f"[[{moved.stem}|Full study notes]]" in body
+    assert f"[[{moved.stem}.pdf|Printable PDF]]" in body
+    assert f'study_notes: "{moved.stem}"' in body
+
+
+def test_a_previous_note_that_is_not_ours_carries_nothing(cfg, monkeypatch):
+    """`previous` is a hint, never a permission: owns_note is re-proven."""
+    transcript = _transcript()
+    stranger = cfg.vault.insights_path / "2026-07-01 stranger.md"
+    stranger.write_text(
+        FOREIGN_NOTE + "\n## Action Items\n- [x] Their closed item\n"
+        + writer.NOTE_END + "\nTheir private notes.\n",
+        encoding="utf-8",
+    )
+
+    written = writer.write_note(
+        cfg, transcript, Insight(headline="Ours", summary="s."),
+        previous=stranger,
+    )
+
+    body = written.read_text(encoding="utf-8")
+    assert "Their private notes." not in body
+    assert "Their closed item" not in body
+    assert "Their private notes." in stranger.read_text(encoding="utf-8")
+
+
+def test_a_failed_lecture_pass_strands_no_recording_and_never_ladders(cfg, monkeypatch):
+    """A propagating study-notes failure must leave no half-state.
+
+    The download used to run first, so a truncated lecture response left an
+    mp3 at a stem no note ever occupied. `claimable_stem` then refused that
+    stem forever, so every retry landed one rung up the ladder and fetched the
+    whole recording again.
+    """
+    from transcript_analyzer.pipeline import lecture as lecture_mod
+    from transcript_analyzer.pipeline.llm import LLMResponseError
+
+    cfg = _pocket_cfg(cfg)
+    transcript = _transcript()
+    insight = Insight(headline="Row reducing a 3x3 matrix", summary="s.", kind="lecture")
+    monkeypatch.setattr(sync, "extract_insight", lambda *a, **k: insight)
+
+    downloads = []
+
+    def record_download(cfg_, t, note_path):
+        downloads.append(note_path)
+        audio = writer.audio_path_for(cfg_, note_path)
+        audio.parent.mkdir(parents=True, exist_ok=True)
+        audio.write_bytes(b"our-recording")
+        return audio.name, False
+
+    monkeypatch.setattr(sync, "_maybe_download_audio", record_download)
+
+    truncated = True
+
+    def produce(*a, **k):
+        if truncated:
+            raise LLMResponseError("Structured output truncated at max_tokens")
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(lecture_mod, "produce", produce)
+
+    with pytest.raises(LLMResponseError):
+        sync.process_transcript(cfg, transcript, llm=None)
+
+    assert downloads == [], "a recording was fetched before the pass that failed"
+    attachments = cfg.vault.insights_path / writer.ATTACHMENTS_SUBDIR
+    assert not list(attachments.glob("*.mp3")), "an mp3 was stranded at an unclaimed stem"
+
+    # The retry reuses the SAME stem rather than laddering past a poisoned one.
+    truncated = False
+    monkeypatch.setattr(sync, "_study_notes_for", lambda *a, **k: None)
+    res = sync.process_transcript(cfg, transcript, llm=None)
+    note = Path(res["note_path"])
+    assert note == writer.note_path_for(cfg, transcript, insight)
+    assert "(t1" not in note.stem, f"the claim ladder advanced: {note.name}"
+    assert downloads == [note]

@@ -768,6 +768,26 @@ def _checked_items(path: Path) -> frozenset[str]:
     return frozenset(t for t, done in parse_action_items(text) if done)
 
 
+def _carry_source(dest: Path, previous: Path | None, transcript_id: str) -> Path | None:
+    """The note this regeneration carries the owner's content across FROM.
+
+    Normally the destination itself. On a RENAME the destination does not
+    exist yet and everything the owner added — the text below `NOTE_END`, the
+    boxes they ticked, the study notes an earlier run recorded — is still at
+    the old stem until the moment that file is deleted, so the note being
+    renamed away from is the source.
+
+    `owns_note` is re-proven here rather than trusted from the caller, so it
+    stays the single proof at the point of use: a source that is not provably
+    this transcript's carries nothing.
+    """
+    if owns_note(dest, transcript_id):
+        return dest
+    if previous is not None and owns_note(previous, transcript_id):
+        return previous
+    return None
+
+
 def _existing_study_link(
     cfg: Config, note_path: Path, transcript_id: str
 ) -> tuple[str | None, bool]:
@@ -813,6 +833,7 @@ def write_note(
     audio_name: str | None = None,
     *,
     path: Path | None = None,
+    previous: Path | None = None,
     study_stem_name: str | None = None,
     has_study_pdf: bool = False,
     asr_repairs: list | None = None,
@@ -843,6 +864,13 @@ def write_note(
     study stem is derived from that path. `study_stem_name` therefore means
     "what this run produced"; absent, the note keeps what the vault already
     holds.
+
+    `previous` is the note this transcript is being renamed AWAY from. A
+    rename writes to a stem that does not exist yet, so without it every
+    carry-across above would silently find nothing and the owner's tail, their
+    ticked boxes and the study link would be destroyed by the very rename that
+    was supposed to move them. It is a hint, not a permission: `_carry_source`
+    re-proves it with `owns_note` before a byte is read.
     """
     if path is None:
         path = note_path_for(cfg, transcript, insight)
@@ -860,18 +888,20 @@ def write_note(
         study_stem_name = None
         has_study_pdf = False
         path = note_path_for(cfg, transcript, insight)
-    ours = owns_note(path, transcript.id)
-    tail = _owner_tail(path) if ours else ""
-    checked = _checked_items(path) if ours else frozenset()
-    if ours and not study_stem_name:
+    source = _carry_source(path, previous, transcript.id)
+    tail = _owner_tail(source) if source else ""
+    checked = _checked_items(source) if source else frozenset()
+    if source and not study_stem_name:
         # This run produced no study notes — the recording is not a lecture,
         # the profile is off, or the pass failed — but an earlier one may have
         # left some, and they are still on disk and still served by the
         # dashboard. Dropping the link would make the note disagree with the
         # vault, so it is carried across exactly like a ticked checkbox is.
+        # The stem is resolved against the DESTINATION: a rename has already
+        # moved the study notes onto it before this runs.
         study_stem_name, has_study_pdf = _existing_study_link(cfg, path, transcript.id)
         if study_stem_name and asr_repairs is None:
-            asr_repairs = _existing_asr_repairs(path)
+            asr_repairs = _existing_asr_repairs(source)
     path.parent.mkdir(parents=True, exist_ok=True)
     generated = render_note(
         transcript,
