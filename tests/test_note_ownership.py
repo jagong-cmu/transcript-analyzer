@@ -153,3 +153,38 @@ def test_retitle_never_renames_over_a_hand_written_note(cfg, monkeypatch):
     rec = indexer.parse_note(moved)
     assert rec is not None and rec.transcript_id == "t1abcdef"
     assert rec.title == "Pricing deck review, July 1st, 2026"
+
+
+def test_a_stem_whose_recording_is_not_ours_is_not_claimed(cfg):
+    """A stem names two files, and only the note can carry the proof.
+
+    The vault owner renames a note in Obsidian; Obsidian rewrites the embed but
+    leaves the attachment at the old stem, so the mp3 is live and referenced
+    while the note path is free. A later transcript that slugifies to that stem
+    must not take it — writing there ends with their recording unlinked, or
+    playing inside our note.
+    """
+    orphan = writer.audio_for_stem(
+        cfg.vault.insights_path, "2026-07-01 pricing-deck-review"
+    )
+    orphan.parent.mkdir(parents=True, exist_ok=True)
+    orphan.write_bytes(b"owner-recording")
+
+    path = writer.write_note(cfg, _transcript(), _insight())
+
+    assert path.name == SUFFIXED_NAME
+    assert not (cfg.vault.insights_path / BASE_NAME).exists()
+    assert orphan.read_bytes() == b"owner-recording"
+
+
+def test_a_stem_we_do_own_keeps_being_claimed_recording_and_all(cfg):
+    """The proof cuts both ways: our own note and mp3 do not push us off."""
+    transcript = _transcript()
+    path = writer.write_note(cfg, transcript, _insight())
+    audio = writer.audio_path_for(cfg, path)
+    audio.parent.mkdir(parents=True, exist_ok=True)
+    audio.write_bytes(b"our-recording")
+
+    assert path.name == BASE_NAME
+    assert writer.write_note(cfg, transcript, _insight()) == path
+    assert audio.read_bytes() == b"our-recording"

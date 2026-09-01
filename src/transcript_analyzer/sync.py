@@ -179,12 +179,16 @@ def process_transcript(
     prev_note = _owned_prev_note(prev_path, transcript)
     prospective = writer.note_path_for(cfg, transcript, insight)
     if prev_note and canonical_note_path(prev_note) != canonical_note_path(prospective):
-        writer.move_audio_with_note(cfg, prev_note, prospective)
+        writer.move_audio_with_note(cfg, prev_note, prospective, transcript.id)
 
     # Download the recording's audio into the vault (Pocket only) and embed it.
     audio_name = _maybe_download_audio(cfg, transcript, prospective)
 
-    note_path = writer.write_note(cfg, transcript, insight, audio_name=audio_name)
+    # The claim above is the ONE decision: the download wrote the mp3 against
+    # it and the body embeds that name, so the note has to land on it too.
+    note_path = writer.write_note(
+        cfg, transcript, insight, audio_name=audio_name, path=prospective
+    )
     result["note_path"] = str(note_path)
 
     if prev_note and _is_stale_note(prev_note, note_path, transcript.id):

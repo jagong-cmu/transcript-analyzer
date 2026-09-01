@@ -13,6 +13,7 @@ Each note's H1 / indexed title is ``{headline}, July 26th, 2026``.
 """
 from __future__ import annotations
 
+import logging
 import re
 from collections import defaultdict
 from pathlib import Path
@@ -22,6 +23,8 @@ from slugify import slugify
 from ..config import Config
 from ..models import Insight, Transcript
 from ..titles import clean_headline, compose_display_title, format_long_date
+
+_log = logging.getLogger(__name__)
 
 CATEGORIES_SUBDIR = "Categories"
 ATTACHMENTS_SUBDIR = "Attachments"
@@ -33,32 +36,54 @@ SYNTH_SUBDIRS = ("Digests", "People", "Studies", "Prep", "Categories")
 SYNTH_BEGIN = "<!-- synth:begin — generated; edits inside this block are overwritten -->"
 SYNTH_END = "<!-- synth:end -->"
 
-_ATX_HEADING_RE = re.compile(r"#{1,6}(?:\s|$)")
+_ATX_HEADING_RE = re.compile(r"(#{1,6})(?:\s|$)")
 
 
-def opens_section(line: str) -> bool:
-    """Whether a body line reads as a section heading when the note is parsed.
+def heading_level(line: str) -> int:
+    """How deep a heading this line is, or 0 when it is not a heading at all.
 
-    The one definition of that question. The reader finds its sections after
-    `line.strip()`, which drops every kind of Unicode whitespace, so this asks
-    the same way: any writer that decided separately what to escape would let
-    a line it considered ordinary text open a section on the way back in.
+    The one definition of "is this a heading". The reader finds its sections
+    after `line.strip()`, which drops every kind of Unicode whitespace, so this
+    asks the same way: any writer that decided separately what to escape would
+    let a line it considered ordinary text open a section on the way back in.
     A line has to be one to six '#' followed by whitespace or nothing else to
     qualify, so a tag or a rank ('#hiring', '#1 priority') is not a heading.
     """
-    return bool(_ATX_HEADING_RE.match(line.strip()))
+    m = _ATX_HEADING_RE.match(line.strip())
+    return len(m.group(1)) if m else 0
+
+
+def opens_section(line: str, max_level: int = 6) -> bool:
+    """Whether the line opens a section no deeper than `max_level`.
+
+    `max_level` is what lets one definition serve both jobs. The writer escapes
+    with the default, because over-escaping the body is harmless and closes the
+    injection hole. TERMINATION is level-aware: a '## Summary' section ends at
+    the next heading of its own level or shallower, while a '### …' the vault
+    owner wrote is nested INSIDE it and must stay in the indexed section — the
+    note is the source of truth and hand edits are respected.
+    """
+    level = heading_level(line)
+    return 0 < level <= max_level
 
 
 def attachments_dir(cfg: Config) -> Path:
     return cfg.vault.insights_path / ATTACHMENTS_SUBDIR
 
 
+def audio_for_stem(insights_root: Path, stem: str) -> Path:
+    """The one definition of where the recording keyed to a note stem lives."""
+    return insights_root / ATTACHMENTS_SUBDIR / f"{stem}.mp3"
+
+
 def audio_path_for(cfg: Config, note_path: Path) -> Path:
-    """Where the audio for a given note note lives (matches the note's stem)."""
-    return attachments_dir(cfg) / f"{note_path.stem}.mp3"
+    """Where the audio for a given note lives (matches the note's stem)."""
+    return audio_for_stem(cfg.vault.insights_path, note_path.stem)
 
 
-def move_audio_with_note(cfg: Config, old_note: Path, new_note: Path) -> Path | None:
+def move_audio_with_note(
+    cfg: Config, old_note: Path, new_note: Path, transcript_id: str
+) -> Path | None:
     """Make a note's recording follow it when the note's filename changes.
 
     Audio is keyed on the note stem, and the stem is derived from the LLM
@@ -66,10 +91,23 @@ def move_audio_with_note(cfg: Config, old_note: Path, new_note: Path) -> Path | 
     Left behind, the old mp3 is orphaned in Attachments/ AND the new stem does
     not exist, so a re-download is paid for a recording the vault already has.
     Returns the new audio path if something was moved.
+
+    An mp3 carries no frontmatter, so the note at its stem is the only thing
+    that can claim it: a recording already sitting at the destination is ours
+    to replace only when the note there is provably ours. Otherwise — an
+    attachment the vault owner still embeds from a note they renamed in
+    Obsidian — nothing is unlinked; the move is skipped and the orphan named.
     """
     old_audio = audio_path_for(cfg, old_note)
     new_audio = audio_path_for(cfg, new_note)
     if old_audio.resolve() == new_audio.resolve() or not old_audio.exists():
+        return None
+    if new_audio.exists() and not owns_note(new_note, transcript_id):
+        _log.warning(
+            "leaving %s in place: no note at that stem proves the recording is "
+            "this transcript's, so %s stays where it is (orphan, clean up by hand)",
+            new_audio, old_audio,
+        )
         return None
     new_audio.parent.mkdir(parents=True, exist_ok=True)
     if new_audio.exists():
@@ -200,6 +238,23 @@ def owns_note(path: Path, transcript_id: str) -> bool:
     return _existing_transcript_id(path) == transcript_id
 
 
+def claimable_stem(note_path: Path, transcript_id: str) -> bool:
+    """Whether EVERY vault file keyed on this stem is free or provably ours.
+
+    A stem names two files — the note and its recording in Attachments/ — and
+    the note is the only one that can carry proof, so the pair is claimable
+    only when the note there is ours, or when neither file exists at all. That
+    is what keeps a still-embedded mp3 whose note the owner renamed away from
+    being unlinked by, or played back inside, somebody else's note.
+    """
+    if owns_note(note_path, transcript_id):
+        return True
+    return (
+        not note_path.exists()
+        and not audio_for_stem(note_path.parent, note_path.stem).exists()
+    )
+
+
 def claim_note_path(base: Path, transcript_id: str) -> Path:
     """The path this transcript may safely occupy, preferring `base`.
 
@@ -207,17 +262,22 @@ def claim_note_path(base: Path, transcript_id: str) -> Path:
     sync path (`note_path_for`) and the retitle migration, so the two cannot
     drift. Free or already ours is `base`; anything else — another
     transcript's note on the same date, a hand-written note, a file we cannot
-    read — falls through to `<stem> (<id6>).md` and keeps going rather than
-    landing on a file that is not ours.
+    read, an attachment stem someone else still owns — falls through to
+    `<stem> (<id6>).md` and keeps going rather than landing on files that are
+    not ours.
     """
-    if not base.exists() or owns_note(base, transcript_id):
+    if claimable_stem(base, transcript_id):
         return base
     short = transcript_id[:6] or "note"
     candidate = base.with_name(f"{base.stem} ({short}){base.suffix}")
     n = 2
-    while candidate.exists() and not owns_note(candidate, transcript_id):
+    while not claimable_stem(candidate, transcript_id):
         candidate = base.with_name(f"{base.stem} ({short}-{n}){base.suffix}")
         n += 1
+    _log.warning(
+        "%s is not this transcript's to write; using %s instead",
+        base.name, candidate.name,
+    )
     return candidate
 
 
@@ -298,9 +358,32 @@ def render_note(transcript: Transcript, insight: Insight, audio_name: str | None
 
 
 def write_note(
-    cfg: Config, transcript: Transcript, insight: Insight, audio_name: str | None = None
+    cfg: Config,
+    transcript: Transcript,
+    insight: Insight,
+    audio_name: str | None = None,
+    *,
+    path: Path | None = None,
 ) -> Path:
-    path = note_path_for(cfg, transcript, insight)
+    """Write the note, at `path` when the caller already claimed one.
+
+    `claim_note_path` reads the filesystem, so evaluating it a second time here
+    could answer differently from the one the caller downloaded the audio
+    against — and the embed baked into the body would name a stem the note no
+    longer sits on. One claim, threaded through both.
+
+    If something else did take that path while the recording streamed, the
+    claim is redone AND the recording follows it, so the name in the body and
+    the file on disk still cannot disagree — and nothing unowned is written over.
+    """
+    if path is None:
+        path = note_path_for(cfg, transcript, insight)
+    elif path.exists() and not owns_note(path, transcript.id):
+        _log.warning("%s was taken while the recording downloaded; re-claiming", path)
+        final = note_path_for(cfg, transcript, insight)
+        moved = move_audio_with_note(cfg, path, final, transcript.id)
+        audio_name = moved.name if moved is not None else None
+        path = final
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(render_note(transcript, insight, audio_name=audio_name), encoding="utf-8")
     return path

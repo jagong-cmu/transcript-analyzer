@@ -35,8 +35,24 @@ against a scratch vault instead of the real one.
 - **Where writer and reader must agree, they share ONE definition rather than two matching
   rules.** "Does this line open a section?" is `writer.opens_section`, used by
   `_body_text` to decide what to escape and by `indexer.is_section_start` (and through it
-  the backfill) to find sections. Re-deriving that test on either side is how the escape and
-  the parse drifted apart before — twice. Add call sites, not second definitions.
+  the backfill) to find sections. Its `max_level` is how the same definition also answers
+  where a section ENDS (`indexer.is_section_end`): the writer escapes any heading shape,
+  but a section closes only at its own level or shallower, so a `###` the vault owner nested
+  under `## Action Items` keeps its commitments in the index. Re-deriving either test on
+  either side is how the escape and the parse drifted apart before — twice. Add call sites,
+  not second definitions.
+- **Nothing is written, renamed or deleted at a vault path that is not PROVABLY that
+  transcript's own.** `writer.owns_note` is the proof (the note's `transcript_id`, read
+  back); unknown for ANY reason — no id line, unreadable, permission denied — means NOT
+  ours. `writer.claim_note_path` is the one definition of "where may this note go", and it
+  claims the whole stem: the note AND the `Attachments/<stem>.mp3` that only a note can
+  claim. All five destructive paths go through them — write (`note_path_for`), rename
+  (`scripts/retitle_notes.py:_target_path`), delete (`sync._is_stale_note`, via
+  `sync._owned_prev_note`), and the audio move and its destination
+  (`writer.move_audio_with_note`). A path that cannot be proven ours is left alone and
+  logged: the vault has no backup, so an orphan to clean up by hand beats a deletion that
+  cannot be undone. Extend a destructive path by adding a call site here, never a sixth
+  ownership rule.
 - Scripts under `scripts/` write to the *live* vault and call the Pocket/Granola/Anthropic
   APIs. Use `--dry-run`/`--limit` when exercising them.
 

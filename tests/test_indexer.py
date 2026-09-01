@@ -551,3 +551,51 @@ def test_sections_end_where_the_shared_predicate_says_they_do(cfg):
     assert rec.action_items == ["Ship the deck"]
     assert rec.open_action_items == ["Ship the deck"]
     assert rec.transcript_text == "Angela: the real transcript."
+
+
+HAND_EDITED_SUBHEADINGS = """---
+source: granola
+date: 2026-07-01
+transcript_id: t19
+headline: "Sub-headings"
+---
+
+# Sub-headings, July 1st, 2026
+
+## Summary
+Angela agreed to review the deck.
+### Context
+She had already read the memo.
+
+## Action Items
+- [ ] Send deck
+### Later
+- [ ] Follow up
+
+## Transcript
+> [!note]- Full transcript
+> Angela: the real transcript.
+"""
+
+
+def test_a_sub_heading_stays_inside_the_section_it_is_nested_under(cfg):
+    """The note is the source of truth, and hand edits are respected.
+
+    A section ends at a SIBLING heading, not at a deeper one the vault owner
+    wrote: terminating on any '#' run dropped '### Context' from the summary
+    and, worse, dropped an OPEN COMMITMENT filed under '### Later' from the
+    index, /commitments and the RAG corpus while the note still showed it.
+    """
+    p = write(cfg.vault.insights_path / "2026-07-01 sub-headings.md",
+              HAND_EDITED_SUBHEADINGS)
+
+    rec = indexer.parse_note(p)
+
+    assert rec is not None
+    assert "Angela agreed to review the deck." in rec.summary
+    assert "### Context" in rec.summary
+    assert "She had already read the memo." in rec.summary
+    assert rec.action_items == ["Send deck", "Follow up"]
+    assert rec.open_action_items == ["Send deck", "Follow up"]
+    # The sibling '## Transcript' still ends the Action Items section.
+    assert rec.transcript_text == "Angela: the real transcript."

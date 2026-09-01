@@ -88,7 +88,7 @@ def _target_path(cfg, when: date, headline: str, transcript_id: str, current: Pa
     return writer.claim_note_path(base, transcript_id)
 
 
-def _rename_with_audio(cfg, old: Path, new: Path, *, dry_run: bool) -> Path:
+def _rename_with_audio(cfg, old: Path, new: Path, transcript_id: str, *, dry_run: bool) -> Path:
     if old.resolve() == new.resolve():
         return old
     if dry_run:
@@ -97,7 +97,7 @@ def _rename_with_audio(cfg, old: Path, new: Path, *, dry_run: bool) -> Path:
     new.parent.mkdir(parents=True, exist_ok=True)
     old_audio = writer.audio_path_for(cfg, old)
     old.rename(new)
-    new_audio = writer.move_audio_with_note(cfg, old, new)
+    new_audio = writer.move_audio_with_note(cfg, old, new, transcript_id)
     if new_audio is not None:
         # Fix embed reference inside the note if present.
         text = new.read_text(encoding="utf-8")
@@ -226,7 +226,7 @@ def retitle(
 
         dumped = frontmatter.dumps(post)
         path.write_text(dumped if dumped.endswith("\n") else dumped + "\n", encoding="utf-8")
-        _rename_with_audio(cfg, path, target, dry_run=False)
+        _rename_with_audio(cfg, path, target, tid, dry_run=False)
         updated += 1
 
     if not dry_run and updated:

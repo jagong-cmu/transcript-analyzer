@@ -107,22 +107,120 @@ def test_unchanged_headline_leaves_the_recording_alone(cfg, monkeypatch):
     assert note.exists()
 
 
-def test_move_audio_with_note_replaces_a_stale_file_at_the_target(cfg):
+def test_move_audio_with_note_replaces_a_stale_file_at_a_stem_we_own(cfg):
+    """A recording at the destination is ours to replace when the note there is."""
+    transcript = _transcript()
     old_note = cfg.vault.insights_path / "2026-07-01 old.md"
-    new_note = cfg.vault.insights_path / "2026-07-01 new.md"
+    new_note = writer.write_note(cfg, transcript, Insight(headline="New"))
     old_audio = writer.audio_path_for(cfg, old_note)
     new_audio = writer.audio_path_for(cfg, new_note)
     old_audio.parent.mkdir(parents=True, exist_ok=True)
     old_audio.write_bytes(b"keep-me")
     new_audio.write_bytes(b"stale")
 
-    assert writer.move_audio_with_note(cfg, old_note, new_note) == new_audio
+    assert writer.move_audio_with_note(cfg, old_note, new_note, transcript.id) == new_audio
     assert new_audio.read_bytes() == b"keep-me"
     assert not old_audio.exists()
 
     # Nothing to move: same note, or no recording on disk.
-    assert writer.move_audio_with_note(cfg, new_note, new_note) is None
-    assert writer.move_audio_with_note(cfg, old_note, new_note) is None
+    assert writer.move_audio_with_note(cfg, new_note, new_note, transcript.id) is None
+    assert writer.move_audio_with_note(cfg, old_note, new_note, transcript.id) is None
+
+
+def test_a_recording_at_a_stem_we_cannot_prove_is_ours_is_never_unlinked(cfg, caplog):
+    """The owner renamed the note in Obsidian; the attachment stayed behind.
+
+    Obsidian rewrites the embed but leaves the file, so that mp3 is live and
+    still referenced while its old note stem is free. Nothing may unlink it on
+    the strength of a stem alone — an mp3 carries no frontmatter, so only a
+    note at that stem can claim it.
+    """
+    transcript = _transcript()
+    old_note = cfg.vault.insights_path / "2026-07-01 old.md"
+    target = cfg.vault.insights_path / "2026-07-01 pricing-deck-review.md"
+    old_audio = writer.audio_path_for(cfg, old_note)
+    target_audio = writer.audio_path_for(cfg, target)
+    old_audio.parent.mkdir(parents=True, exist_ok=True)
+    old_audio.write_bytes(b"our-recording")
+    target_audio.write_bytes(b"owner-recording")
+
+    with caplog.at_level(logging.WARNING, logger="transcript_analyzer.obsidian.writer"):
+        moved = writer.move_audio_with_note(cfg, old_note, target, transcript.id)
+
+    assert moved is None
+    assert target_audio.read_bytes() == b"owner-recording"
+    assert old_audio.read_bytes() == b"our-recording", "our own recording was lost"
+    assert str(target_audio) in caplog.text
+
+
+def test_a_recording_whose_note_is_unreadable_is_never_unlinked(cfg, monkeypatch):
+    transcript = _transcript()
+    old_note = cfg.vault.insights_path / "2026-07-01 old.md"
+    target = writer.write_note(cfg, transcript, Insight(headline="Target"))
+    old_audio = writer.audio_path_for(cfg, old_note)
+    target_audio = writer.audio_path_for(cfg, target)
+    old_audio.parent.mkdir(parents=True, exist_ok=True)
+    old_audio.write_bytes(b"our-recording")
+    target_audio.write_bytes(b"unknown-recording")
+
+    real_read_text = Path.read_text
+
+    def denied(self, *args, **kwargs):
+        if Path(self) == target:
+            raise PermissionError(13, "Permission denied")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", denied)
+
+    assert writer.move_audio_with_note(cfg, old_note, target, transcript.id) is None
+    assert target_audio.read_bytes() == b"unknown-recording"
+    assert old_audio.read_bytes() == b"our-recording"
+
+
+FOREIGN_NOTE = """---
+source: granola
+date: 2026-07-01
+transcript_id: someone-else
+---
+
+# Not ours
+"""
+
+
+def test_a_path_taken_during_the_download_keeps_the_body_and_the_disk_in_step(
+    cfg, monkeypatch
+):
+    """One claim, threaded through the audio destination and the note.
+
+    The claim is filesystem-dependent and the download between the two uses of
+    it can run for minutes. Re-deciding afterwards put the note on the
+    disambiguated stem while its '![[…]]' embed — and the mp3 — stayed on the
+    original one, so the player silently disappeared from that note.
+    """
+    cfg = _pocket_cfg(cfg)
+    transcript = _transcript()
+    insight = Insight(headline="Pricing deck review with Angela", summary="S.")
+    monkeypatch.setattr(sync, "extract_insight", lambda *a, **k: insight)
+
+    claimed = writer.note_path_for(cfg, transcript, insight)
+
+    def download_while_someone_takes_the_path(cfg_, transcript_, note_path):
+        note_path.write_text(FOREIGN_NOTE, encoding="utf-8")
+        audio = writer.audio_path_for(cfg_, note_path)
+        audio.parent.mkdir(parents=True, exist_ok=True)
+        audio.write_bytes(b"our-recording")
+        return audio.name
+
+    monkeypatch.setattr(sync, "_maybe_download_audio", download_while_someone_takes_the_path)
+
+    result = sync.process_transcript(cfg, transcript, llm=None)
+    note_path = Path(result["note_path"])
+
+    assert claimed.read_text(encoding="utf-8") == FOREIGN_NOTE, "wrote over a note that is not ours"
+    assert note_path != claimed
+    audio = writer.audio_path_for(cfg, note_path)
+    assert audio.exists() and audio.read_bytes() == b"our-recording"
+    assert f"![[{audio.name}]]" in note_path.read_text(encoding="utf-8")
 
 
 def _granola_transcript() -> Transcript:
@@ -233,6 +331,7 @@ def test_resync_never_deletes_a_note_it_cannot_prove_is_its_own(cfg, monkeypatch
     a_note, a_audio = _seed_previous_note(cfg, a, shared_headline)
 
     a_note.unlink()  # the vault owner deletes it in Obsidian
+    a_audio.unlink()
 
     b = _other_transcript()
     b_note = writer.write_note(cfg, b, Insight(headline=shared_headline, summary="B."))
