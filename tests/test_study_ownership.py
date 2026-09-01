@@ -220,3 +220,45 @@ def test_the_pdf_link_names_the_stem_that_was_actually_claimed(cfg):
     assert "Someone else's" in taken.read_text()
     # No PDF was rendered, so no PDF is linked — and never a stem we do not own.
     assert ".pdf" not in out.study_path.read_text()
+
+
+def test_a_study_stem_the_ladder_moved_is_still_this_transcripts(cfg):
+    """The reader walks the same rungs the writer did.
+
+    A stranger holding the plain stem pushes the write to `… (id6)`. That file
+    is still ours, so the resolver has to find it — a reader that only looked
+    at the base would call the study notes missing and leave them behind on
+    every rename.
+    """
+    note = cfg.vault.insights_path / "2026-09-01 lecture.md"
+    taken = foreign_note(study_base(cfg))
+    ours = writer.write_study_note(cfg, note, OURS, "notes")
+
+    assert ours != taken
+    assert writer.resolve_study_note_path(cfg, note, OURS) == ours
+    # And not weakened to find one: the stranger's file is never claimed.
+    assert writer.resolve_study_note_path(cfg, note, THEIRS) == taken
+    assert writer.resolve_study_note_path(cfg, note, "t-third") is None
+
+
+def test_a_stem_with_no_study_notes_at_all_resolves_to_nothing(cfg):
+    note = cfg.vault.insights_path / "2026-09-01 lecture.md"
+    assert writer.resolve_study_note_path(cfg, note, OURS) is None
+
+
+def test_laddered_study_notes_follow_the_note_when_it_is_renamed(cfg):
+    old_note = cfg.vault.insights_path / "2026-09-01 old name.md"
+    new_note = cfg.vault.insights_path / "2026-09-01 new name.md"
+    taken = foreign_note(writer.study_note_path_for(cfg, old_note))
+    ours = writer.write_study_note(cfg, old_note, OURS, "notes")
+    writer.write_study_pdf(ours, OURS, b"%PDF ours")
+    assert ours != taken
+
+    moved = writer.move_study_with_note(cfg, old_note, new_note, OURS)
+
+    assert moved == writer.study_note_path_for(cfg, new_note)
+    assert moved.exists() and not ours.exists()
+    assert writer.study_pdf_for(moved).read_bytes() == b"%PDF ours"
+    assert not writer.study_pdf_for(ours).exists()
+    # The stranger who held the plain stem is untouched by the rename.
+    assert "Someone else's" in taken.read_text()

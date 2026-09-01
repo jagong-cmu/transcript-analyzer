@@ -265,6 +265,7 @@ def process_transcript(
         audio_name=audio_name,
         path=prospective,
         study_stem_name=study.stem if study else None,
+        has_study_pdf=bool(study and study.pdf_path),
         asr_repairs=study.notes.asr_repairs if study else None,
     )
     result["note_path"] = str(note_path)

@@ -17,7 +17,9 @@ import logging
 import re
 import time
 from collections import defaultdict
+from itertools import islice
 from pathlib import Path
+from typing import Iterator
 
 from slugify import slugify
 
@@ -465,27 +467,46 @@ def claimable_study_stem(study_md: Path, transcript_id: str) -> bool:
     return not study_pdf_for(study_md).exists()
 
 
+def _claim_ladder(base: Path, transcript_id: str) -> Iterator[Path]:
+    """Every path this transcript might occupy, in the order it would take them.
+
+    THE suffix ladder, shared by every namespace that claims a stem, so the
+    "not ours -> `<stem> (<id6>)`" fallback cannot drift between them — and
+    shared by the READERS, so a stem that landed further up the ladder is not
+    invisible to the dashboard or left behind by a rename. Infinite: the
+    claimer stops at the first free rung, a reader bounds its own walk.
+    """
+    yield base
+    short = transcript_id[:6] or "note"
+    yield base.with_name(f"{base.stem} ({short}){base.suffix}")
+    n = 2
+    while True:
+        yield base.with_name(f"{base.stem} ({short}-{n}){base.suffix}")
+        n += 1
+
+
+# How far a reader walks the ladder looking for a stem already taken. The
+# claimer only advances past a rung something else occupies, so a note this
+# deep means dozens of colliding stems on one day; beyond that, not found.
+LADDER_SCAN_DEPTH = 32
+
+
 def _claim_path(base: Path, transcript_id: str, claimable) -> Path:
     """The path this transcript may safely occupy, preferring `base`.
 
-    THE suffix ladder, shared by every namespace that claims a stem, so the
-    "not ours -> `<stem> (<id6>)`" fallback cannot drift between them.
     `claimable` is the namespace's own proof of what a stem covers (the note
     plus its recording; or the study note plus its PDF).
     """
-    if claimable(base, transcript_id):
-        return base
-    short = transcript_id[:6] or "note"
-    candidate = base.with_name(f"{base.stem} ({short}){base.suffix}")
-    n = 2
-    while not claimable(candidate, transcript_id):
-        candidate = base.with_name(f"{base.stem} ({short}-{n}){base.suffix}")
-        n += 1
-    _log.warning(
-        "%s is not this transcript's to write; using %s instead",
-        base.name, candidate.name,
-    )
-    return candidate
+    for candidate in _claim_ladder(base, transcript_id):
+        if not claimable(candidate, transcript_id):
+            continue
+        if candidate != base:
+            _log.warning(
+                "%s is not this transcript's to write; using %s instead",
+                base.name, candidate.name,
+            )
+        return candidate
+    raise AssertionError("the claim ladder is infinite")  # pragma: no cover
 
 
 def claim_note_path(base: Path, transcript_id: str) -> Path:
@@ -507,6 +528,25 @@ def claim_study_path(base: Path, transcript_id: str) -> Path:
     return _claim_path(base, transcript_id, claimable_study_stem)
 
 
+def resolve_study_note(base: Path, transcript_id: str) -> Path | None:
+    """The study note this transcript PROVABLY owns on `base`'s ladder, or None.
+
+    The inverse of `claim_study_path`, over the same rungs: a stem the claimer
+    pushed to `<stem> (<id6>).md` because someone else held the base is still
+    this transcript's, and a reader that only ever looked at the base would
+    treat those study notes as missing — invisible to the dashboard, left
+    behind by a rename.
+
+    Ownership is not weakened to find one: `owns_note` is the whole test, so
+    an absent note, a note with no id, or somebody else's file all answer
+    None, and nothing is written, moved or served against them.
+    """
+    for candidate in islice(_claim_ladder(base, transcript_id), LADDER_SCAN_DEPTH):
+        if owns_note(candidate, transcript_id):
+            return candidate
+    return None
+
+
 def move_study_with_note(
     cfg: Config, old_note: Path, new_note: Path, transcript_id: str
 ) -> Path | None:
@@ -517,17 +557,26 @@ def move_study_with_note(
     warning. The vault has no backup, so an orphaned PDF to delete by hand
     beats a move that overwrites somebody else's file. Returns the new study
     note path when something moved.
+
+    The SOURCE is resolved through the claim ladder, because that is where the
+    write may have put it: study notes that landed at `<stem> (<id6>)` are
+    still this transcript's and must follow it. The DESTINATION stays the
+    plain stem — a rename takes the name it asked for or none at all.
     """
-    old_md = study_note_path_for(cfg, old_note)
+    old_base = study_note_path_for(cfg, old_note)
     new_md = study_note_path_for(cfg, new_note)
-    if old_md.resolve() == new_md.resolve() or not old_md.exists():
+    if old_base.resolve() == new_md.resolve():
         return None
-    if not owns_note(old_md, transcript_id):
-        _log.warning(
-            "leaving %s where it is: its transcript_id does not prove the study "
-            "notes are this transcript's to move (orphan, clean up by hand)",
-            old_md,
-        )
+    old_md = resolve_study_note(old_base, transcript_id)
+    if old_md is None:
+        if old_base.exists():
+            _log.warning(
+                "leaving %s where it is: its transcript_id does not prove the study "
+                "notes are this transcript's to move (orphan, clean up by hand)",
+                old_base,
+            )
+        return None
+    if old_md.resolve() == new_md.resolve():
         return None
     if not claimable_study_stem(new_md, transcript_id):
         _log.warning(
@@ -568,6 +617,7 @@ def render_note(
     audio_name: str | None = None,
     *,
     study_stem_name: str | None = None,
+    has_study_pdf: bool = False,
     asr_repairs: list | None = None,
     checked: frozenset[str] = frozenset(),
 ) -> str:
@@ -580,6 +630,11 @@ def render_note(
     `checked` carries the action items the reader had already ticked, so a
     regeneration does not silently reopen closed commitments — ticking a box
     in Obsidian is the designed way to close one.
+
+    `has_study_pdf` is whether a PDF was actually written at that stem: the
+    renderer may have been unavailable, and the note must not offer a
+    download of a file the vault does not hold. Same gate the study notes'
+    own PDF link uses.
     """
     people_links = [_wikilink(p) for p in insight.people]
     headline = note_headline(transcript, insight)
@@ -643,10 +698,10 @@ def render_note(
         body.append("")
     if study_stem_name:
         body.append("## Study Notes")
-        body.append(
-            f"- [[{study_stem_name}|Full study notes]]"
-            f"  ·  [[{study_stem_name}.pdf|Printable PDF]]"
-        )
+        link = f"- [[{study_stem_name}|Full study notes]]"
+        if has_study_pdf:
+            link += f"  ·  [[{study_stem_name}.pdf|Printable PDF]]"
+        body.append(link)
         body.append("")
     body.append("## Summary")
     body.append(
@@ -683,16 +738,21 @@ def _owner_tail(path: Path) -> str:
     transcript callout, whose end `transcript_bounds` is the one definition
     of. Anything this returns is appended back verbatim after the regenerated
     region — the note is the source of truth and hand edits are respected.
+
+    The marker is matched as a whole LINE, never as a substring: the callout
+    writes every transcript line as `> …`, so a recording (or a hand-typed
+    tail) that happens to contain the marker text would otherwise be found
+    first and every regeneration would splice from inside the transcript.
     """
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return ""
-    idx = text.find(NOTE_END)
-    if idx != -1:
-        tail = text[idx + len(NOTE_END):]
+    lines = text.splitlines()
+    end = next((i for i, ln in enumerate(lines) if ln.strip() == NOTE_END), None)
+    if end is not None:
+        tail = "\n".join(lines[end + 1:])
     else:
-        lines = text.splitlines()
         bounds = transcript_bounds(lines)
         if bounds is None:
             return ""
@@ -720,6 +780,7 @@ def write_note(
     *,
     path: Path | None = None,
     study_stem_name: str | None = None,
+    has_study_pdf: bool = False,
     asr_repairs: list | None = None,
 ) -> Path:
     """Write the note, at `path` when the caller already claimed one.
@@ -756,6 +817,7 @@ def write_note(
         # transcript's files. They stay orphans until this one changes again.
         audio_name = None
         study_stem_name = None
+        has_study_pdf = False
         path = note_path_for(cfg, transcript, insight)
     ours = owns_note(path, transcript.id)
     tail = _owner_tail(path) if ours else ""
@@ -766,6 +828,7 @@ def write_note(
         insight,
         audio_name=audio_name,
         study_stem_name=study_stem_name,
+        has_study_pdf=has_study_pdf,
         asr_repairs=asr_repairs,
         checked=checked,
     )
@@ -844,6 +907,19 @@ def claim_study_note_path(cfg: Config, note_path: Path, transcript_id: str) -> P
     threaded through the audio embed and `write_note`.
     """
     return claim_study_path(study_note_path_for(cfg, note_path), transcript_id)
+
+
+def resolve_study_note_path(
+    cfg: Config, note_path: Path, transcript_id: str
+) -> Path | None:
+    """The study note a transcript note actually has, ladder included, or None.
+
+    The reader's counterpart to `claim_study_note_path`: same base, same
+    rungs, `owns_note` as the only proof. Every reader of the study namespace
+    goes through here rather than assuming the base stem, so notes the ladder
+    moved are neither invisible nor left behind.
+    """
+    return resolve_study_note(study_note_path_for(cfg, note_path), transcript_id)
 
 
 def write_study_note(

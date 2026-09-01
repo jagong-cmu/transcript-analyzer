@@ -98,7 +98,9 @@ def _rename_with_audio(cfg, old: Path, new: Path, transcript_id: str, *, dry_run
         return new
     new.parent.mkdir(parents=True, exist_ok=True)
     old_audio = writer.audio_path_for(cfg, old)
-    old_study = writer.study_note_path_for(cfg, old)
+    # The ladder may have put the study notes off the plain stem; the links
+    # below name the file that is really there.
+    old_study = writer.resolve_study_note_path(cfg, old, transcript_id)
     # Both moves run BEFORE the rename: each proves ownership through the note
     # at the source stem, and after the rename that stem no longer holds it.
     new_audio = writer.move_audio_with_note(cfg, old, new, transcript_id)
@@ -109,9 +111,19 @@ def _rename_with_audio(cfg, old: Path, new: Path, transcript_id: str, *, dry_run
         text = new.read_text(encoding="utf-8")
         if new_audio is not None:
             text = text.replace(f"![[{old_audio.name}]]", f"![[{new_audio.name}]]")
-        if new_study is not None:
+        if new_study is not None and old_study is not None:
             text = text.replace(f"[[{old_study.stem}", f"[[{new_study.stem}")
         new.write_text(text, encoding="utf-8")
+    if new_study is not None and old_study is not None:
+        # The study note carries its own stem-keyed links — back to the
+        # recording, and to its PDF — and nothing regenerates them: this
+        # script is one-shot. Rewrite them where they now live.
+        study_text = new_study.read_text(encoding="utf-8")
+        study_text = study_text.replace(f"[[{old.stem}|", f"[[{new.stem}|")
+        study_text = study_text.replace(
+            f"[[{old_study.stem}.pdf|", f"[[{new_study.stem}.pdf|"
+        )
+        new_study.write_text(study_text, encoding="utf-8")
     with get_conn(cfg.db_path) as conn:
         # note_path is not unique — sync_state is keyed on (source, native_id),
         # and a deleted-then-retaken filename legitimately leaves two rows

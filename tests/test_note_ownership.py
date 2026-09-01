@@ -332,3 +332,49 @@ def test_retitle_moves_only_the_sync_state_row_that_owns_the_note(cfg, monkeypat
     with get_conn(cfg.db_path) as conn:
         assert get_sync_note_path(conn, "granola", "MINE") == canonical_note_path(moved)
         assert get_sync_note_path(conn, "granola", "SOMEONE-ELSE") == canonical_note_path(old)
+
+
+def test_retitle_repoints_the_study_notes_own_links(cfg, monkeypatch):
+    """The study note names files by stem too, and nothing regenerates it.
+
+    `study_markdown` writes a link back to the recording's note and one to its
+    own PDF, both from the pre-rename stems. Retitle is a one-shot migration,
+    so if it does not repoint them they dangle for good.
+    """
+    from transcript_analyzer.render import study as study_render
+
+    monkeypatch.setattr(retitle_notes, "load_config", lambda: cfg)
+    old = cfg.vault.insights_path / "2026-07-01 raw-source-title.md"
+    old.write_text(NOTE_TO_RETITLE, encoding="utf-8")
+    old_study = writer.study_note_path_for(cfg, old)
+    study_md = study_render.study_markdown(
+        _study_notes(),
+        title="Pricing deck review",
+        when=date(2026, 7, 1),
+        transcript_stem=old.stem,
+        pdf_name=f"{old_study.stem}.pdf",
+    )
+    written = writer.write_study_note(cfg, old, "t1abcdef", study_md, title="Study")
+    writer.write_study_pdf(written, "t1abcdef", b"%PDF ours")
+
+    result = retitle_notes.retitle(cheap=True)
+
+    assert result["updated"] == 1 and result["errors"] == 0
+    moved = cfg.vault.insights_path / BASE_NAME
+    new_study = writer.study_note_path_for(cfg, moved)
+    assert new_study.exists() and not written.exists()
+
+    text = new_study.read_text(encoding="utf-8")
+    assert f"[[{moved.stem}|Recording and transcript]]" in text
+    assert f"[[{new_study.stem}.pdf|Printable PDF]]" in text
+    assert old.stem not in text, "a link to the pre-rename stem was left dangling"
+    assert writer.study_pdf_for(new_study).read_bytes() == b"%PDF ours"
+
+
+def _study_notes():
+    from transcript_analyzer.models import StudyNotes, StudySection
+
+    return StudyNotes(
+        overview="Angela reviews the deck.",
+        sections=[StudySection(heading="Pricing", body="The deck.", anchor="deck")],
+    )

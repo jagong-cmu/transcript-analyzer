@@ -113,6 +113,8 @@ def test_a_lecture_gets_study_notes_linked_from_its_note(no_pdf_cfg):
     note = Path(res["note_path"]).read_text()
     assert "## Study Notes" in note
     assert f"[[{written[0].stem}|Full study notes]]" in note
+    # No PDF was rendered, so neither rendering of the lecture links one.
+    assert "Printable PDF" not in note and "Printable PDF" not in notes
     # The study-notes overview becomes the note's detailed summary.
     assert "The class row reduced a three by three matrix." in note
     assert 'kind: "lecture"' in note and 'course_code: "21-241"' in note
@@ -185,3 +187,50 @@ def test_the_study_notes_namespace_is_never_indexed_as_a_transcript(no_pdf_cfg):
     with get_conn(cfg.db_path) as conn:
         ids = {r.transcript_id for r in all_transcripts(conn)}
     assert ids == {"lec5"}
+
+
+def test_a_missing_asset_cache_costs_the_pdf_and_nothing_else(cfg, monkeypatch):
+    """The documented contract: no render assets, no PDF — the notes survive.
+
+    The failure has to arrive at the lecture pass as a PdfRenderError. Any
+    other exception is caught by sync's blanket handler, which throws away the
+    whole study-notes result — the markdown included — over a missing library.
+    """
+    pytest.importorskip("playwright.sync_api")
+    from transcript_analyzer.render import assets, pdf as pdf_render
+
+    def no_assets(data_dir, dest):
+        raise assets.AssetError("cdn unreachable and nothing cached")
+
+    monkeypatch.setattr(pdf_render, "playwright_available", lambda: True)
+    monkeypatch.setattr(assets, "stage_assets", no_assets)
+
+    llm = StubLLM(extraction("lecture", "21-241", "Linear Algebra"))
+    res = run(cfg, llm, transcript("lec6", LECTURE_TEXT, "Lecture"))
+
+    assert res["study_notes"] is not None, "the markdown study notes were lost"
+    assert res["study_pdf"] is None
+    assert "Order of row operations." in Path(res["study_notes"]).read_text()
+
+    note = Path(res["note_path"]).read_text()
+    assert "|Full study notes]]" in note
+    # And no download is offered for a file the vault does not hold.
+    assert "Printable PDF" not in note
+
+
+def test_the_note_links_the_pdf_exactly_when_one_was_written(cfg, monkeypatch):
+    """The transcript note and the study note must agree about the PDF."""
+    from transcript_analyzer.render import pdf as pdf_render
+
+    monkeypatch.setattr(
+        pdf_render,
+        "render_pdf",
+        lambda html, data_dir: pdf_render.RenderResult(pdf=b"%PDF-1.4 fake", kept=1),
+    )
+    llm = StubLLM(extraction("lecture", "21-241", "Linear Algebra"))
+    res = run(cfg, llm, transcript("lec7", LECTURE_TEXT, "Lecture"))
+
+    stem = Path(res["study_notes"]).stem
+    assert Path(res["study_pdf"]).read_bytes() == b"%PDF-1.4 fake"
+    assert f"[[{stem}.pdf|Printable PDF]]" in Path(res["note_path"]).read_text()
+    assert f"[[{stem}.pdf|Printable PDF]]" in Path(res["study_notes"]).read_text()

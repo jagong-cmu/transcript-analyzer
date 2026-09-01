@@ -94,9 +94,15 @@ across the Python versions `pyproject` declares (3.10–3.12) — a change has t
   `Study Notes/<note stem> (study notes).md` holds `transcript_id`; the `.pdf` beside it has no
   frontmatter, so that note is the only proof of whose it is — `writer.claimable_study_stem`,
   `claim_study_path`, `write_study_pdf` and `move_study_with_note` are the four call sites, all
-  built on `owns_note` and on the ONE suffix ladder in `writer._claim_path` (shared with
-  `claim_note_path`). The study stem is deliberately NOT the note's own stem: two vault files
-  with one name make every `[[wikilink]]` to it ambiguous.
+  built on `owns_note` and on the ONE suffix ladder, now `writer._claim_ladder` (shared with
+  `claim_note_path`). READERS walk that same ladder through `writer.resolve_study_note` /
+  `resolve_study_note_path` — the dashboard's `web/app.py:_study_paths`, the retitle link
+  rewrite, and `move_study_with_note`'s source end — because a stem the ladder pushed to
+  `<stem> (<id6>)` is still ours, and a reader that assumed the base stem made those notes
+  invisible and left them behind on a rename. The resolver PROVES with `owns_note` and answers
+  None otherwise, so nothing unowned is served, moved or written. The study stem is deliberately
+  NOT the note's own stem: two vault files with one name make every `[[wikilink]]` to it
+  ambiguous.
 - **A transcript note is regenerated, not overwritten.** `write_note` splices the region
   between `writer.NOTE_BEGIN`/`NOTE_END`, keeps whatever the owner wrote below the end marker,
   and carries ticked checkboxes across (ticking one is how a commitment is closed — reopening

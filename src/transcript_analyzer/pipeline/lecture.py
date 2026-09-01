@@ -332,7 +332,7 @@ def study_notes_from_payload(
             _log.info("study notes: dropping ungrounded section %r", heading)
             dropped_claims += 1
             continue
-        visuals, dropped_v = _clean_visuals(raw.get("visuals"), budget)
+        visuals = _clean_visuals(raw.get("visuals"), budget)
         budget -= len(visuals)
         sections.append(
             StudySection(heading=heading, body=body, anchor=anchor, visuals=visuals)
@@ -387,25 +387,25 @@ def study_notes_from_payload(
     )
 
 
-def _clean_visuals(raw, budget: int) -> tuple[list[Visual], int]:
-    """Structurally valid visuals, up to `budget`. Returns (kept, dropped).
+def _clean_visuals(raw, budget: int) -> list[Visual]:
+    """Structurally valid visuals, up to `budget`.
 
     This is the cheap gate: a spec that cannot possibly render is dropped
     here, before a browser is started. The expensive gate is the renderer
     itself, which drops whatever mermaid or KaTeX refuses.
+
+    It does not count what it drops: the caller derives that from what the
+    model proposed against what survived, which also catches the visuals lost
+    with a section the citation gate refused. One source for the number.
     """
     kept: list[Visual] = []
-    dropped = 0
     for item in _as_dicts(raw):
         if len(kept) >= budget:
-            dropped += 1
-            continue
+            break
         v = _clean_visual(item)
-        if v is None:
-            dropped += 1
-            continue
-        kept.append(v)
-    return kept, dropped
+        if v is not None:
+            kept.append(v)
+    return kept
 
 
 def _clean_visual(item: dict) -> Optional[Visual]:

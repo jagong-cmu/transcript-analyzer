@@ -167,6 +167,7 @@ def _write_one(
         audio_name=_existing_audio_name(cfg, path),
         path=path,
         study_stem_name=study.stem if study else None,
+        has_study_pdf=bool(study and study.pdf_path),
         asr_repairs=study.notes.asr_repairs if study else None,
     )
     index_note(cfg, written)

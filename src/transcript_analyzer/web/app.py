@@ -406,12 +406,18 @@ def _study_paths(rec) -> tuple[Optional[Path], Optional[Path]]:
     Existence is the whole test: study notes are written only for lectures,
     and the PDF only when the renderer produced one, so asking the filesystem
     keeps the dashboard honest about what the vault actually holds.
+
+    The lookup walks the claim ladder the writer used, so study notes that
+    landed at `<stem> (<id6>)` are found — and only ones this transcript
+    provably owns are ever served.
     """
     if not rec.note_path:
         return None, None
-    md = writer.study_note_path_for(cfg, Path(rec.note_path))
+    md = writer.resolve_study_note_path(cfg, Path(rec.note_path), rec.transcript_id)
+    if md is None:
+        return None, None
     pdf = writer.study_pdf_for(md)
-    return (md if md.exists() else None), (pdf if pdf.exists() else None)
+    return md, (pdf if pdf.exists() else None)
 
 
 @app.get("/study/{tid}")

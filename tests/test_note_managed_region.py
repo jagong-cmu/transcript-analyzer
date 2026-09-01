@@ -135,3 +135,27 @@ def test_repeated_regeneration_does_not_grow_the_gap(cfg):
         shapes.add(text[text.index(writer.NOTE_END):])
     assert len(shapes) == 1, "the note is not byte-stable across regenerations"
     assert path.read_text().count("Kept.") == 1
+
+
+def test_a_transcript_that_quotes_the_end_marker_does_not_split_the_note(cfg):
+    """The marker is a LINE, not a substring anywhere in the file.
+
+    The callout writes every transcript line as '> …', so a recording that
+    mentions the marker text used to be found before the real marker: the
+    splice started inside the transcript and duplicated the whole managed
+    region on every regeneration.
+    """
+    spoken = f"[0:01] Angela: the note ends at {writer.NOTE_END} apparently."
+    path = writer.write_note(cfg, transcript(spoken), insight())
+    path.write_text(path.read_text() + "\n## My own notes\nKept.\n", encoding="utf-8")
+
+    writer.write_note(cfg, transcript(spoken), insight())
+    once = path.read_text()
+    writer.write_note(cfg, transcript(spoken), insight())
+    twice = path.read_text()
+
+    assert once == twice, "the note is not byte-stable across regenerations"
+    assert once.count("apparently.") == 1, "the transcript was spliced into the tail"
+    assert once.count(writer.NOTE_BEGIN) == 1
+    assert once.count("Kept.") == 1
+    assert indexer.parse_note(path).transcript_text == spoken

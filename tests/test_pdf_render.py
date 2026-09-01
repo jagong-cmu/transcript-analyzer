@@ -101,3 +101,21 @@ def test_a_missing_browser_is_a_clear_error_not_a_silent_empty_pdf(monkeypatch, 
     monkeypatch.setattr(pdf, "playwright_available", lambda: False)
     with pytest.raises(pdf.PdfRenderError, match="playwright is not installed"):
         pdf.render_pdf("<html></html>", tmp_path)
+
+
+def test_an_unavailable_asset_cache_is_a_render_error_not_an_escape(monkeypatch, tmp_path):
+    """Staging the page is part of producing it.
+
+    An AssetError leaving `render_pdf` would sail past the only exception the
+    lecture pass catches, and the whole (paid) study-notes result would be
+    discarded instead of the PDF alone.
+    """
+    pytest.importorskip("playwright.sync_api")
+    monkeypatch.setattr(pdf, "playwright_available", lambda: True)
+
+    def no_assets(data_dir, dest):
+        raise assets.AssetError("cdn unreachable and nothing cached")
+
+    monkeypatch.setattr(assets, "stage_assets", no_assets)
+    with pytest.raises(pdf.PdfRenderError, match="cdn unreachable"):
+        pdf.render_pdf("<html></html>", tmp_path)

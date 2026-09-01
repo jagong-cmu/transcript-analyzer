@@ -82,3 +82,42 @@ def test_the_lectures_page_is_fine_with_an_empty_vault(cfg, app_mod):
     page = TestClient(app_mod.app).get("/lectures")
     assert page.status_code == 200
     assert "No lectures yet" in page.text
+
+
+def foreign_study_note(cfg, note_stem, tid="someone-else"):
+    """A study note at `note_stem`'s plain stem that belongs to somebody else."""
+    path = writer.study_note_for(cfg.vault.insights_path, note_stem)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"---\nsynth: true\ntranscript_id: {tid}\n---\n\n# Someone else's\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_study_notes_the_claim_ladder_moved_are_still_offered(cfg, app_mod):
+    """A stranger on the plain stem pushes the write to `… (id6)`.
+
+    Those notes are still the lecture's own, so the dashboard has to find them
+    the way the writer claimed them — otherwise the PDF this lecture paid for
+    is invisible for as long as the collision lasts.
+    """
+    taken = foreign_study_note(cfg, "2026-09-01 lec1")
+    seed(cfg, app_mod)
+    client = TestClient(app_mod.app)
+
+    assert "/study/lec1" in client.get("/transcript/lec1").text
+    served = client.get("/study/lec1")
+    assert served.status_code == 200 and served.content == b"%PDF-1.4 rendered"
+    assert "Someone else's" in taken.read_text()
+
+
+def test_a_study_note_that_is_not_this_transcripts_is_never_served(cfg, app_mod):
+    """Existence on the stem is not proof; the id in the note is."""
+    seed(cfg, app_mod, kind="meeting", tid="mtg2")
+    taken = foreign_study_note(cfg, "2026-09-01 mtg2")
+    writer.study_pdf_for(taken).write_bytes(b"%PDF theirs")
+
+    client = TestClient(app_mod.app)
+    assert "/study/mtg2" not in client.get("/transcript/mtg2").text
+    assert client.get("/study/mtg2").status_code == 404

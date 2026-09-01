@@ -136,14 +136,14 @@ def render_pdf(html: str, data_dir: Path) -> RenderResult:
 
     with tempfile.TemporaryDirectory(prefix="ta-study-") as tmp:
         work = Path(tmp)
-        # Local copies, loaded over file:// with relative paths — that is what
-        # lets KaTeX's stylesheet find its own fonts, and what keeps an
-        # unattended render working when the network is not there.
-        assets.stage_assets(data_dir, work)
-        page_path = work / "index.html"
-        page_path.write_text(html, encoding="utf-8")
-
         try:
+            # Local copies, loaded over file:// with relative paths — that is
+            # what lets KaTeX's stylesheet find its own fonts, and what keeps
+            # an unattended render working when the network is not there.
+            assets.stage_assets(data_dir, work)
+            page_path = work / "index.html"
+            page_path.write_text(html, encoding="utf-8")
+
             with sync_playwright() as p:
                 browser = p.chromium.launch()
                 try:
@@ -167,6 +167,12 @@ def render_pdf(html: str, data_dir: Path) -> RenderResult:
             raise PdfRenderError(f"study-notes render timed out: {e}") from e
         except PlaywrightError as e:
             raise PdfRenderError(f"study-notes render failed: {e}") from e
+        except (assets.AssetError, OSError) as e:
+            # Staging the page is part of producing it, so a missing asset
+            # cache is the same kind of failure as a browser that will not
+            # start: it costs the PDF, and the caller still writes the
+            # markdown study notes.
+            raise PdfRenderError(f"study-notes page could not be staged: {e}") from e
 
     dropped = [
         DroppedVisual(id=str(d.get("id", "")), reason=str(d.get("reason", "")))
