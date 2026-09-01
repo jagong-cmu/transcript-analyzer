@@ -442,3 +442,80 @@ def test_a_healthy_extraction_carries_no_marker(no_pdf_cfg):
               transcript("ok1", MEETING_TEXT, "Sync"))
     body = Path(res["note_path"]).read_text()
     assert "extract_error:" not in body and res["extract_error"] is None
+
+
+def test_a_truncated_extraction_never_downgrades_an_existing_note(no_pdf_cfg, monkeypatch):
+    """A DEGRADED pass adds a marker; it never renames, deletes, or blanks.
+
+    An empty insight makes `note_path_for` derive the stem from the raw
+    recording title instead of the LLM headline, so a re-sync became a rename:
+    the mp3 moved, the managed region was rebuilt from nothing, the previous
+    good note was deleted, and `record_sync` made it permanent — in a vault
+    with no backup.
+    """
+    from transcript_analyzer.pipeline.llm import LLMTruncatedError
+
+    cfg = no_pdf_cfg
+    text = LECTURE_TEXT * 4
+    good = StubLLM(extraction("lecture", "21-241", "Linear Algebra",
+                              "Row reducing a 3x3 matrix"))
+    first = run(cfg, good, transcript("keep1", text, "raw pocket recording"))
+    note = Path(first["note_path"])
+    before = note.read_text()
+    assert "row-reducing" in note.stem
+
+    class TruncatingLLM(StubLLM):
+        def chat_json(self, system, user, schema, *, max_tokens=None, stage="", stream=False):
+            self.stages.append(stage)
+            raise LLMTruncatedError("Structured output truncated at max_tokens")
+
+    # A re-sync of the same transcript whose extraction now overflows.
+    again = run(cfg, TruncatingLLM(extraction("lecture")),
+                transcript("keep1", text + "\n[3:00] and one more thing.\n", "raw pocket recording"))
+
+    assert Path(again["note_path"]) == note, "a degraded pass renamed the note"
+    assert note.exists(), "the previous good note was deleted"
+    others = [p for p in cfg.vault.insights_path.glob("*.md")
+              if p.stem != cfg.vault.insights_folder]
+    assert others == [note], f"a second note was written: {[p.name for p in others]}"
+
+    body = note.read_text()
+    assert "extract_error:" in body
+    assert "cut off at its output cap" in body
+    # Everything the last complete extraction produced is still there.
+    assert 'headline: "Row reducing a 3x3 matrix"' in body
+    assert 'abstract: "One paragraph abstract."' in body
+    assert 'kind: "lecture"' in body and 'course_code: "21-241"' in body
+    assert "- A point" in body
+    assert "- [ ] Do the thing" in body
+    # The first run was a lecture, so its summary is the study-notes overview.
+    assert "The class row reduced a three by three matrix." in body
+    assert "_No summary._" not in body
+    assert "the last complete extraction" in body
+    # The transcript itself is refreshed — that part of the pass did work.
+    assert "and one more thing." in body
+    assert before != body
+
+
+def test_a_marked_note_never_lends_its_marker_to_the_corpus(no_pdf_cfg, monkeypatch):
+    """`NoteRecord.summary` is the corpus every Ask question carries and the
+    haystack the citation gate quotes against. The failure callout must not
+    become the conversation's description."""
+    from transcript_analyzer.pipeline.indexer import parse_note
+    from transcript_analyzer.pipeline.llm import LLMTruncatedError
+
+    cfg = no_pdf_cfg
+
+    class TruncatingLLM(StubLLM):
+        def chat_json(self, system, user, schema, *, max_tokens=None, stage="", stream=False):
+            self.stages.append(stage)
+            raise LLMTruncatedError("Structured output truncated at max_tokens")
+
+    res = run(cfg, TruncatingLLM(extraction("meeting")),
+              transcript("mark1", MEETING_TEXT, "A recording with no prior note"))
+    rec = parse_note(Path(res["note_path"]))
+
+    assert rec is not None
+    assert "[!warning]" not in rec.summary
+    assert "truncated at max_tokens" not in rec.summary
+    assert rec.summary == "", f"the marker leaked into the corpus: {rec.summary!r}"

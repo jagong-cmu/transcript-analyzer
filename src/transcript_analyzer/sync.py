@@ -32,7 +32,7 @@ from .db import (
 from .models import Insight, Transcript
 from .obsidian import writer
 from .pipeline import lecture
-from .pipeline.indexer import index_note
+from .pipeline.indexer import index_note, insight_from_note
 from .pipeline.insights import extract_insight
 from .pipeline.llm import (
     LLM,
@@ -191,7 +191,7 @@ def _known_courses(cfg: Config) -> dict:
 
 
 def _insight_for(
-    cfg: Config, transcript: Transcript, llm: LLM
+    cfg: Config, transcript: Transcript, llm: LLM, previous: Optional[Path] = None
 ) -> tuple[Insight, str]:
     """(insight, terminal failure reason) for the extraction pass.
 
@@ -203,12 +203,17 @@ def _insight_for(
     again, every interval, until the monthly ceiling halts ingestion for
     everything else.
 
-    So it is recorded instead of retried: an empty insight comes back with the
-    reason, the note is written from what the recording itself carries — its
-    title, its date and its full transcript — and `record_sync` is reached, so
-    it bills ONCE. The note says where its summary went rather than showing an
-    empty one; `render_note(extract_error=…)` is what makes it visibly
-    incomplete instead of quietly wrong.
+    So it is recorded instead of retried: the reason comes back, the note is
+    written carrying a visible marker, and `record_sync` is reached, so it
+    bills ONCE.
+
+    What the note SAYS in that case is whatever the last complete extraction
+    left, read back off the note itself. A degraded pass must never be a
+    downgrade: an empty payload would blank the summary, the key points, the
+    action items and the `kind` — and, because the headline drives the
+    filename, rename the note and strand its recording. There is nothing to
+    carry only when this transcript has no note yet, and then the marker
+    stands alone.
 
     Kill-switch and budget errors still propagate untouched, and every other
     failure still reaches the caller's handler unchanged.
@@ -219,11 +224,13 @@ def _insight_for(
         ), ""
     except LLMTruncatedError as e:
         _log.warning(
-            "extraction for %r overflowed the output cap (%s); writing a marked "
-            "note rather than paying for the same overflow every cycle",
+            "extraction for %r overflowed the output cap (%s); marking the note "
+            "and keeping what the last complete extraction wrote, rather than "
+            "paying for the same overflow every cycle",
             transcript.title, e,
         )
-        return Insight(), str(e)
+        carried = insight_from_note(previous) if previous is not None else None
+        return (carried or Insight()), str(e)
 
 
 def _study_attempts_key(transcript_id: str) -> str:
@@ -309,7 +316,14 @@ def process_transcript(
     *,
     dry_run: bool = False,
 ) -> dict:
-    insight, extract_error = _insight_for(cfg, transcript, llm)
+    # The note this transcript already has, proven ours, resolved BEFORE the
+    # extraction: a truncated pass carries its content forward rather than
+    # replacing it with a blank.
+    with get_conn(cfg.db_path) as conn:
+        prev_path = get_sync_note_path(conn, transcript.source, transcript.native_id)
+    prev_note = _owned_prev_note(prev_path, transcript)
+
+    insight, extract_error = _insight_for(cfg, transcript, llm, previous=prev_note)
     display = compose_display_title(
         insight.headline or transcript.title, transcript.date
     )
@@ -327,13 +341,15 @@ def process_transcript(
     if dry_run:
         return result
 
-    # If this transcript was previously written under a different category/name,
-    # remove the stale note file so we don't leave duplicates in the vault.
-    with get_conn(cfg.db_path) as conn:
-        prev_path = get_sync_note_path(conn, transcript.source, transcript.native_id)
-
-    prev_note = _owned_prev_note(prev_path, transcript)
-    prospective = writer.note_path_for(cfg, transcript, insight)
+    # A DEGRADED pass — one whose extraction truncated — never renames and
+    # never deletes. It has no new headline to justify moving a note, an mp3
+    # and a study stem, and `record_sync` below would make the move permanent.
+    # It writes exactly where the note already is; only a transcript with no
+    # note yet takes a fresh stem.
+    degraded = bool(extract_error) and prev_note is not None
+    prospective = (
+        prev_note if degraded else writer.note_path_for(cfg, transcript, insight)
+    )
 
     # EVERY step that can propagate runs before EVERY step that mutates the
     # vault. The lecture pass is the propagating one (budget, kill switch, a
@@ -359,7 +375,11 @@ def process_transcript(
     # study move is skipped when the pass just wrote fresh notes at the
     # destination stem — moving the superseded ones over them would destroy
     # what was generated moments ago.
-    if prev_note and canonical_note_path(prev_note) != canonical_note_path(prospective):
+    if (
+        prev_note
+        and not degraded
+        and canonical_note_path(prev_note) != canonical_note_path(prospective)
+    ):
         writer.move_audio_with_note(cfg, prev_note, prospective, transcript.id)
         if study is None:
             writer.move_study_with_note(cfg, prev_note, prospective, transcript.id)
@@ -391,7 +411,7 @@ def process_transcript(
     # one held, so removing the old one loses nothing. A failure between the
     # two leaves an orphan to clean up by hand, which this vault can recover
     # from — a delete before the write is not recoverable at all.
-    if prev_note and _is_stale_note(prev_note, note_path, transcript.id):
+    if prev_note and not degraded and _is_stale_note(prev_note, note_path, transcript.id):
         try:
             os.remove(prev_note)
         except OSError:

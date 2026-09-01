@@ -15,9 +15,13 @@ TWO summaries come out of this one call, and the distinction matters:
 `kind` classification rides along in the same call rather than costing a
 second one; a `lecture` is what makes sync buy the study-notes pass.
 
-Failures propagate (LLMError and subclasses) — under a paid API we never
-write an empty note we were billed for; the sync loop counts the failure and
-retries the transcript on a later cycle.
+Failures propagate (LLMError and subclasses) — under a paid API a transcript
+we could not extract is retried on a later cycle rather than written up from
+nothing. ONE exception, and it is deliberate: `sync._insight_for` catches
+`LLMTruncatedError`, because a response cut off at `MAX_TOKENS` overflows the
+same way forever and retrying it re-bills every sync interval. That path
+writes the note once, carrying a visible marker and whatever the last complete
+extraction left, and records the transcript so no later cycle pays again.
 """
 from __future__ import annotations
 

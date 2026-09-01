@@ -149,9 +149,16 @@ across the Python versions `pyproject` declares (3.10–3.12) — a change has t
   Any stage that can raise it therefore owes three things: catch it where the note write is
   decided, write the note carrying a VISIBLE marker plus a queryable frontmatter key, and let
   `record_sync` be reached so it bills ONCE. Two call sites implement that rule today —
-  `sync._insight_for` (`render_note(extract_error=…)`, `extract_error:`; the note falls back to
-  the recording's own title, date and full transcript rather than showing an empty summary) and
-  `sync._study_notes_for` (`render_note(study_error=…)`, `study_notes_error:`). A new stage
+  `sync._insight_for` (`render_note(extract_error=…)`, `extract_error:`) and
+  `sync._study_notes_for` (`render_note(study_error=…)`, `study_notes_error:`). A marker is
+  ADDITIVE, never a downgrade: `_insight_for` reads the last complete extraction back off the
+  note (`indexer.insight_from_note`) so a truncated pass keeps its summary, key points, action
+  items and `kind` — and, because the headline drives the filename, keeps the note where it is.
+  `sync.process_transcript` makes that structural too: a `degraded` pass writes at the existing
+  path and skips the audio move, the study move and the delete, so it can never rename or
+  destroy a good note. The marker must also stay OUT of the corpus — `indexer.parse_note` does
+  not fall back to the body summary when `extract_error:` is set, or the failure text would
+  become `NoteRecord.summary` and be sent on every Ask question. A new stage
   inherits the rule; it does not get to re-derive it. An unusable response that MIGHT be
   transient is different: bounded retries (`sync.STUDY_NOTE_MAX_ATTEMPTS`) ending in the same
   terminal marker. `LLMKillSwitchError` / `LLMBudgetError` always propagate untouched. A marker

@@ -134,6 +134,10 @@ def test_a_visual_that_will_not_settle_loses_to_the_deadline(render_dir, monkeyp
     no error and no log line. The deadline is shortened here so the bound is
     what ends the test, not a real spin.
     """
+    # ONLY the render deadline is shortened. `page.goto` keeps its own generous
+    # bound, so loading the half-megabyte mermaid bundle cannot be what trips —
+    # Playwright's own message also contains "exceeded", and a test that can
+    # pass for the wrong reason is worse than no test.
     monkeypatch.setattr(pdf, "RENDER_TIMEOUT_MS", 250)
     notes = notes_with(
         Visual(kind="mermaid", caption="Fine.", source="flowchart TD\n  A-->B")
@@ -151,7 +155,8 @@ def test_a_visual_that_will_not_settle_loses_to_the_deadline(render_dir, monkeyp
     with pytest.raises(pdf.PdfRenderError) as caught:
         pdf.render_pdf(stuck, render_dir)
 
-    assert "exceeded" in str(caught.value)
+    # The IN-PAGE deadline's own message, not Playwright's generic timeout.
+    assert "study-notes render exceeded" in str(caught.value)
     assert time.monotonic() - started < 60, "the deadline did not end the render"
 
 

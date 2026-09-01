@@ -34,6 +34,10 @@ _log = logging.getLogger(__name__)
 # unbounded from here; it runs after the loop has provably finished, on a page
 # that is already laid out.
 RENDER_TIMEOUT_MS = 60_000
+# Loading the page is a SEPARATE bound from the diagram deadline above: the
+# staged mermaid bundle alone is over half a megabyte, so folding the two
+# together would let a slow load masquerade as a spinning diagram.
+PAGE_LOAD_TIMEOUT_MS = 60_000
 PDF_MARGIN = "16mm"
 
 
@@ -178,11 +182,11 @@ def render_pdf(html: str, data_dir: Path) -> RenderResult:
                 browser = p.chromium.launch()
                 try:
                     page = browser.new_page()
-                    page.set_default_timeout(RENDER_TIMEOUT_MS)
+                    page.set_default_timeout(PAGE_LOAD_TIMEOUT_MS)
                     page.goto(
                         page_path.as_uri(),
                         wait_until="load",
-                        timeout=RENDER_TIMEOUT_MS,
+                        timeout=PAGE_LOAD_TIMEOUT_MS,
                     )
                     outcome = page.evaluate(_RENDER_JS, RENDER_TIMEOUT_MS)
                     pdf = page.pdf(

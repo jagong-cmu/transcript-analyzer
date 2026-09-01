@@ -642,10 +642,11 @@ def render_note(
     that were never produced.
 
     `extract_error` is the same contract one stage earlier: extraction itself
-    came back unusable, so there is no headline, summary or key point to show.
-    The note is still written — it carries the recording's own title, date and
-    full transcript — but it says so where the summary would have been, rather
-    than presenting an empty one as if the recording had nothing in it.
+    came back unusable. The marker is ADDITIVE — it goes above whatever
+    summary the note already had rather than replacing it, because a degraded
+    pass that cannot improve on the last good extraction must not overwrite it
+    either. When there genuinely is no summary the marker says so, rather than
+    presenting an empty one as if the recording had nothing in it.
     """
     people_links = [_wikilink(p) for p in insight.people]
     headline = note_headline(transcript, insight)
@@ -729,15 +730,23 @@ def render_note(
         body.append(f"> {_one_line(study_error)}")
         body.append("")
     body.append("## Summary")
+    summary_text = _body_text(
+        insight.detailed_summary or insight.summary, within="## Summary"
+    )
     if extract_error:
-        body.append("> [!warning] The extraction pass was cut off, so this note has no summary.")
+        body.append("> [!warning] The extraction pass was cut off at its output cap.")
         body.append(f"> {_one_line(extract_error)}")
-        body.append("> The full transcript below is complete and unaffected.")
-    else:
         body.append(
-            _body_text(insight.detailed_summary or insight.summary, within="## Summary")
-            or "_No summary._"
+            "> What follows is from the last complete extraction."
+            if summary_text
+            else "> This note has no summary; the transcript below is complete."
         )
+        if summary_text:
+            body.append("")
+    if summary_text:
+        body.append(summary_text)
+    elif not extract_error:
+        body.append("_No summary._")
     body.append("")
     body.append("## Key Points")
     body.extend([f"- {kp}" for kp in key_points] or ["- _None._"])
