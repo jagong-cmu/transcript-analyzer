@@ -39,6 +39,7 @@ from .pipeline.llm import (
     LLMBudgetError,
     LLMKillSwitchError,
     LLMResponseError,
+    LLMTruncatedError,
 )
 from .pipeline.quality import junk_reason
 from .titles import compose_display_title
@@ -50,6 +51,12 @@ FAILURE_COUNTER_KEY = "insight_failures_total"
 # Marks a sync_state row whose note is written but whose recording still has to
 # be fetched, so the stored hash cannot match and the next pass reprocesses it.
 AUDIO_RETRY_HASH_SUFFIX = ":audio-retry"
+
+# How many times a study-notes response that MIGHT be transient is retried
+# before the note is written with a visible failure marker instead. Each retry
+# is a full lecture-stage call, so an unbounded one bills a 32k-output Opus 5
+# request every sync interval until the monthly ceiling stops all ingestion.
+STUDY_NOTE_MAX_ATTEMPTS = 3
 
 
 def _high_water_key(source: str) -> str:
@@ -183,35 +190,80 @@ def _known_courses(cfg: Config) -> dict:
         return index_courses(known_course_rows(conn))
 
 
+def _study_attempts_key(transcript_id: str) -> str:
+    return f"study_attempts:{transcript_id}"
+
+
+def _bump_study_attempts(cfg: Config, transcript_id: str) -> int:
+    with get_conn(cfg.db_path) as conn:
+        key = _study_attempts_key(transcript_id)
+        n = int(get_meta(conn, key) or 0) + 1
+        set_meta(conn, key, str(n))
+    return n
+
+
+def _clear_study_attempts(cfg: Config, transcript_id: str) -> None:
+    with get_conn(cfg.db_path) as conn:
+        set_meta(conn, _study_attempts_key(transcript_id), "0")
+
+
 def _study_notes_for(
     cfg: Config, transcript: Transcript, insight: Insight, llm: LLM, note_path: Path
-):
-    """The lecture profile, or None when this is not a lecture we can serve.
+) -> tuple[Optional["lecture.StudyOutcome"], str]:
+    """(outcome, terminal failure reason) for one lecture's study-notes pass.
 
-    Budget and kill-switch errors PROPAGATE — they mean stop, and the caller's
-    handler stops the whole pass. So does a truncated or unparseable response:
-    it was cut off at `lecture_max_tokens`, so the right outcome is to fail
-    this transcript, leave `record_sync` unreached, and let the next cycle
-    reprocess it — not to silently write a downgraded note and then skip the
-    recording forever because its hash was recorded as done.
+    Three postures, because "the response was bad" is not one failure.
 
-    Anything else is contained: a note with a detailed summary and no study
-    notes is still the deliverable, and the alternative is losing the
-    transcript entirely over a diagram. A renderer failure never reaches here
-    at all — `lecture.produce` handles it and still writes the markdown.
+    Budget and kill-switch errors PROPAGATE: they mean stop the whole run.
+
+    A TRUNCATED response is deterministic — the same transcript against the
+    same `lecture_max_tokens` overflows identically forever — so retrying it
+    buys nothing and re-bills a 32k-output Opus 5 call every sync cycle until
+    the monthly ceiling halts ingestion for everything else. It is terminal on
+    the first attempt: the reason comes back, the note is written carrying a
+    visible marker, and `record_sync` is reached so the transcript is not
+    reprocessed. One extract call, one lecture call, then done.
+
+    Any other unusable response MIGHT be transient, so it is retried — but a
+    bounded number of times, ending in that same terminal marked note rather
+    than looping forever.
+
+    Everything else is contained: a note with a detailed summary and no study
+    notes is still the deliverable. A renderer failure never reaches here at
+    all — `lecture.produce` handles it and still writes the markdown.
     """
     if not (insight.is_lecture and cfg.lecture.enabled):
-        return None
+        return None, ""
     try:
-        return lecture.produce(cfg, transcript, insight, note_path, llm)
-    except (LLMKillSwitchError, LLMBudgetError, LLMResponseError):
+        outcome = lecture.produce(cfg, transcript, insight, note_path, llm)
+    except (LLMKillSwitchError, LLMBudgetError):
         raise
+    except LLMTruncatedError as e:
+        _clear_study_attempts(cfg, transcript.id)
+        _log.warning(
+            "study notes for %s overflowed the output cap (%s); writing the "
+            "note with a failure marker rather than paying for the same "
+            "overflow every cycle", note_path.name, e,
+        )
+        return None, str(e)
+    except LLMResponseError as e:
+        attempts = _bump_study_attempts(cfg, transcript.id)
+        if attempts < STUDY_NOTE_MAX_ATTEMPTS:
+            raise
+        _clear_study_attempts(cfg, transcript.id)
+        _log.warning(
+            "study notes for %s failed %d times (%s); writing the note with a "
+            "failure marker", note_path.name, attempts, e,
+        )
+        return None, str(e)
     except Exception as e:  # noqa: BLE001 - study notes must not cost the note
         _log.warning(
             "study notes failed for %s (%s); writing the note without them",
             note_path.name, e,
         )
-        return None
+        return None, ""
+    _clear_study_attempts(cfg, transcript.id)
+    return outcome, ""
 
 
 def process_transcript(
@@ -235,6 +287,7 @@ def process_transcript(
         "note_path": None,
         "study_notes": None,
         "study_pdf": None,
+        "study_error": None,
     }
     if dry_run:
         return result
@@ -244,22 +297,17 @@ def process_transcript(
     with get_conn(cfg.db_path) as conn:
         prev_path = get_sync_note_path(conn, transcript.source, transcript.native_id)
 
-    # A re-worded headline renames the note; carry its recording and its study
-    # notes across first, so nothing below writes a second copy beside them.
     prev_note = _owned_prev_note(prev_path, transcript)
     prospective = writer.note_path_for(cfg, transcript, insight)
-    if prev_note and canonical_note_path(prev_note) != canonical_note_path(prospective):
-        writer.move_audio_with_note(cfg, prev_note, prospective, transcript.id)
-        writer.move_study_with_note(cfg, prev_note, prospective, transcript.id)
 
-    # Lectures get study notes and a PDF, written under Study Notes/ against
-    # the stem this note is about to take. This runs BEFORE the download on
-    # purpose: the pass can propagate (a truncated response is retried, not
-    # absorbed), and a failure after the download would strand an mp3 at a
-    # stem no note ever occupies — which makes `claimable_stem` refuse that
-    # stem forever after and pushes every retry one rung up the ladder,
-    # re-downloading the recording each cycle.
-    study = _study_notes_for(cfg, transcript, insight, llm, prospective)
+    # EVERY step that can propagate runs before EVERY step that mutates the
+    # vault. The lecture pass is the propagating one (budget, kill switch, a
+    # response worth retrying), so it goes first: a failure after the rename
+    # moves or the download would leave an mp3 or a study note on a stem no
+    # note ever occupies, `claimable_stem` would refuse that stem forever
+    # after, and every retry would land one rung up the ladder and re-fetch
+    # the whole recording.
+    study, study_error = _study_notes_for(cfg, transcript, insight, llm, prospective)
     if study is not None:
         result["study_notes"] = str(study.study_path) if study.study_path else None
         result["study_pdf"] = str(study.pdf_path) if study.pdf_path else None
@@ -269,6 +317,17 @@ def process_transcript(
             insight = insight.model_copy(
                 update={"detailed_summary": study.notes.overview}
             )
+    result["study_error"] = study_error or None
+
+    # A re-worded headline renames the note; carry its recording and its study
+    # notes across, so nothing below writes a second copy beside them. The
+    # study move is skipped when the pass just wrote fresh notes at the
+    # destination stem — moving the superseded ones over them would destroy
+    # what was generated moments ago.
+    if prev_note and canonical_note_path(prev_note) != canonical_note_path(prospective):
+        writer.move_audio_with_note(cfg, prev_note, prospective, transcript.id)
+        if study is None:
+            writer.move_study_with_note(cfg, prev_note, prospective, transcript.id)
 
     # Download the recording's audio into the vault (Pocket only) and embed it.
     audio_name, audio_still_owed = _maybe_download_audio(cfg, transcript, prospective)
@@ -287,6 +346,7 @@ def process_transcript(
         previous=prev_note,
         study_stem_name=study.stem if study else None,
         has_study_pdf=bool(study and study.pdf_path),
+        study_error=study_error,
         asr_repairs=study.notes.asr_repairs if study else None,
     )
     result["note_path"] = str(note_path)

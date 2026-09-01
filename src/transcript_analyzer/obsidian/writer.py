@@ -614,6 +614,7 @@ def render_note(
     *,
     study_stem_name: str | None = None,
     has_study_pdf: bool = False,
+    study_error: str = "",
     asr_repairs: list | None = None,
     checked: frozenset[str] = frozenset(),
 ) -> str:
@@ -631,6 +632,13 @@ def render_note(
     renderer may have been unavailable, and the note must not offer a
     download of a file the vault does not hold. Same gate the study notes'
     own PDF link uses.
+
+    `study_error` says the study-notes pass failed and why. It is written for
+    a reader to SEE, because the alternative — a lecture note that looks
+    complete while silently having no study notes — is the failure this whole
+    profile exists to avoid. It never implies notes exist: with a study stem
+    it reads as a failed refresh of notes still on disk, without one as notes
+    that were never produced.
     """
     people_links = [_wikilink(p) for p in insight.people]
     headline = note_headline(transcript, insight)
@@ -679,6 +687,8 @@ def render_note(
             fm_lines.append(f"    corrected: {_yaml_str(r.corrected)}")
     if study_stem_name:
         fm_lines.append(f"study_notes: {_yaml_str(study_stem_name)}")
+    if study_error:
+        fm_lines.append(f"study_notes_error: {_yaml_str(_one_line(study_error))}")
     if insight.sentiment:
         fm_lines.append(f"sentiment: {insight.sentiment}")
     fm_lines.append("---")
@@ -692,12 +702,22 @@ def render_note(
         body.append("## Recording")
         body.append(f"![[{audio_name}]]")
         body.append("")
-    if study_stem_name:
+    if study_stem_name or study_error:
         body.append("## Study Notes")
+    if study_stem_name:
         link = f"- [[{study_stem_name}|Full study notes]]"
         if has_study_pdf:
             link += f"  ·  [[{study_stem_name}.pdf|Printable PDF]]"
         body.append(link)
+        body.append("")
+    if study_error:
+        what = (
+            "could not be refreshed; the notes linked above are from an "
+            "earlier run" if study_stem_name
+            else "could not be generated, so this lecture has none"
+        )
+        body.append(f"> [!warning] Study notes {what}.")
+        body.append(f"> {_one_line(study_error)}")
         body.append("")
     body.append("## Summary")
     body.append(
@@ -836,6 +856,7 @@ def write_note(
     previous: Path | None = None,
     study_stem_name: str | None = None,
     has_study_pdf: bool = False,
+    study_error: str = "",
     asr_repairs: list | None = None,
 ) -> Path:
     """Write the note, at `path` when the caller already claimed one.
@@ -909,6 +930,7 @@ def write_note(
         audio_name=audio_name,
         study_stem_name=study_stem_name,
         has_study_pdf=has_study_pdf,
+        study_error=study_error,
         asr_repairs=asr_repairs,
         checked=checked,
     )

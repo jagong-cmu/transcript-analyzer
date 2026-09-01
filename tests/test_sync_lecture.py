@@ -287,3 +287,101 @@ def test_a_contained_study_failure_still_writes_the_note(no_pdf_cfg):
 
     assert res["study_notes"] is None
     assert "A much longer summary of what happened, at length." in Path(res["note_path"]).read_text()
+
+
+def test_a_truncated_lecture_bills_once_and_marks_the_note(no_pdf_cfg):
+    """Truncation at the output cap is DETERMINISTIC, so retrying it is waste.
+
+    The same transcript against the same cap overflows identically forever, so
+    an unbounded retry re-pays for a 32k-output Opus 5 call every sync cycle
+    until the monthly ceiling halts ingestion for everything else. The note is
+    written once, carrying a marker a reader can see, and the transcript is
+    recorded as synced so no later cycle pays again.
+    """
+    from transcript_analyzer.pipeline.llm import LLMTruncatedError
+
+    cfg = no_pdf_cfg
+
+    class TruncatingLLM(StubLLM):
+        def chat_json(self, system, user, schema, *, max_tokens=None, stage="", stream=False):
+            self.stages.append(stage)
+            if stage == "lecture":
+                raise LLMTruncatedError(
+                    "Structured output truncated at max_tokens; raise the limit."
+                )
+            return self.extraction_payload
+
+    llm = TruncatingLLM(extraction("lecture", "21-241", "Linear Algebra"))
+    t = transcript("lec10", LECTURE_TEXT, "Lecture")
+
+    res = run(cfg, llm, t)
+
+    assert res["study_notes"] is None and res["study_pdf"] is None
+    assert "truncated at max_tokens" in res["study_error"]
+    assert llm.stages == ["extract", "lecture"]
+
+    # Recorded as synced under its own hash: the next cycle short-circuits and
+    # buys nothing at all.
+    from transcript_analyzer.db import get_sync_hash
+
+    with get_conn(cfg.db_path) as conn:
+        assert get_sync_hash(conn, t.source, t.native_id) == t.hash
+
+    note = Path(res["note_path"]).read_text()
+    assert "## Study Notes" in note
+    assert "could not be generated" in note
+    assert "truncated at max_tokens" in note
+    assert "study_notes_error:" in note
+    # And it never claims study notes exist.
+    assert "Full study notes" not in note and "Printable PDF" not in note
+
+
+def test_a_truncated_refresh_keeps_the_notes_already_on_disk(no_pdf_cfg):
+    """A failed refresh is not the same as having none: keep linking them."""
+    from transcript_analyzer.pipeline.llm import LLMTruncatedError
+
+    cfg = no_pdf_cfg
+    llm = StubLLM(extraction("lecture", "21-241", "Linear Algebra"))
+    first = run(cfg, llm, transcript("lec11", LECTURE_TEXT, "Lecture"))
+    study_stem = Path(first["study_notes"]).stem
+
+    class TruncatingLLM(StubLLM):
+        def chat_json(self, system, user, schema, *, max_tokens=None, stage="", stream=False):
+            self.stages.append(stage)
+            if stage == "lecture":
+                raise LLMTruncatedError("Structured output truncated at max_tokens")
+            return self.extraction_payload
+
+    again = run(cfg, TruncatingLLM(extraction("lecture", "21-241", "Linear Algebra")),
+                transcript("lec11", LECTURE_TEXT, "Lecture"))
+
+    note = Path(again["note_path"]).read_text()
+    assert f"[[{study_stem}|Full study notes]]" in note
+    assert "could not be refreshed" in note
+    assert "study_notes_error:" in note
+
+
+def test_a_retryable_lecture_failure_is_bounded_not_endless(no_pdf_cfg):
+    """A response that MIGHT be transient is retried — a bounded number of
+    times, then written with the same terminal marker."""
+    from transcript_analyzer.pipeline.llm import LLMResponseError
+
+    cfg = no_pdf_cfg
+
+    class BadJson(StubLLM):
+        def chat_json(self, system, user, schema, *, max_tokens=None, stage="", stream=False):
+            self.stages.append(stage)
+            if stage == "lecture":
+                raise LLMResponseError("Claude returned invalid JSON")
+            return self.extraction_payload
+
+    t = transcript("lec12", LECTURE_TEXT, "Lecture")
+    payload = extraction("lecture", "21-241", "Linear Algebra")
+
+    for _ in range(sync.STUDY_NOTE_MAX_ATTEMPTS - 1):
+        with pytest.raises(LLMResponseError):
+            run(cfg, BadJson(payload), t)
+
+    res = run(cfg, BadJson(payload), t)
+    assert "invalid JSON" in res["study_error"]
+    assert "could not be generated" in Path(res["note_path"]).read_text()

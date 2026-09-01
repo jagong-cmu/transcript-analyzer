@@ -131,15 +131,28 @@ across the Python versions `pyproject` declares (3.10–3.12) — a change has t
   markdown so the two renderings never disagree. Nothing is ever drawn to stand in for a failed
   diagram. The PDF is rendered BEFORE the markdown is written for exactly that reason, and the
   markdown is written BEFORE the PDF bytes because it is the ownership proof for the stem.
-- **An unattended pass must not leave half-state a retry cannot undo.** `sync.process_transcript`
-  runs the lecture pass BEFORE `_maybe_download_audio` because `_study_notes_for` propagates a
-  truncated response (`LLMResponseError`) rather than absorbing it: failing after the download
-  would strand an mp3 at a stem no note ever occupies, and `claimable_stem` then refuses that
-  stem forever, so every retry lands one rung further up `_claim_ladder` and re-fetches the
-  whole recording. Order side effects so the propagating step comes first. The same rule makes
-  `LLMResponseError` a PER-NOTE failure in `scripts/backfill_summaries.py` — only the kill
-  switch and the budget end a run, since a `--batch` run has already been billed for every
-  payload it would discard.
+- **An unattended pass must not leave half-state a retry cannot undo.** In
+  `sync.process_transcript` EVERY step that can propagate runs before EVERY step that mutates
+  the vault: the lecture pass goes first, ahead of `move_audio_with_note`,
+  `move_study_with_note` AND `_maybe_download_audio`. A failure after any of them strands an
+  mp3 or a study note at a stem no note ever occupies, `claimable_stem` then refuses that stem
+  forever, and every retry lands one rung further up `_claim_ladder` and re-fetches the whole
+  recording. The study move is skipped when the pass produced notes — it would move the
+  superseded ones over what was just generated. The same rule makes `LLMResponseError` a
+  PER-NOTE failure in `scripts/backfill_summaries.py`: only the kill switch and the budget end
+  a run, since a `--batch` run has already been billed for every payload it would discard.
+- **A DETERMINISTIC failure is not retried; it is recorded in the note.** `LLMTruncatedError`
+  (raised by `llm._parse_json_message` on `stop_reason == "max_tokens"`) is its own type
+  because the same transcript against the same cap overflows identically forever — retrying it
+  re-bills a 32k-output Opus 5 call every sync interval until `monthly_budget_usd` halts
+  ingestion for everything else. `sync._study_notes_for` makes it terminal on the first
+  attempt: the note is written with `render_note(study_error=…)` — a visible `## Study Notes`
+  warning plus a queryable `study_notes_error:` — and `record_sync` is reached, so it bills
+  ONCE. An unusable response that might be transient is retried up to
+  `sync.STUDY_NOTE_MAX_ATTEMPTS` and then gets the same terminal marker. The marker never
+  implies notes exist; when a previous run's notes are still provably on disk they stay linked
+  and it reads as a failed refresh. Raising `lecture_max_tokens` is not the fix — a
+  deterministic overflow can exceed any cap.
 - **Models and effort are per STAGE, not global.** `LLM.create/stream/chat_json` take
   `stage=` and resolve the model and `output_config.effort` from
   `[anthropic.stage_models]` / `[anthropic.stage_effort]`; `_record` prices the model that

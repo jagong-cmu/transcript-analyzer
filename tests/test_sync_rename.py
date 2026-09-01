@@ -736,9 +736,89 @@ def test_a_failed_lecture_pass_strands_no_recording_and_never_ladders(cfg, monke
 
     # The retry reuses the SAME stem rather than laddering past a poisoned one.
     truncated = False
-    monkeypatch.setattr(sync, "_study_notes_for", lambda *a, **k: None)
+    monkeypatch.setattr(sync, "_study_notes_for", lambda *a, **k: (None, ""))
     res = sync.process_transcript(cfg, transcript, llm=None)
     note = Path(res["note_path"])
     assert note == writer.note_path_for(cfg, transcript, insight)
     assert "(t1" not in note.stem, f"the claim ladder advanced: {note.name}"
     assert downloads == [note]
+
+
+def test_a_propagating_lecture_pass_leaves_the_rename_untouched(cfg, monkeypatch):
+    """Every mutating step runs after every step that can propagate.
+
+    The moves used to run first, so a lecture pass that raised left the mp3
+    and the study notes on the destination stem with no note there.
+    `claimable_stem` then refused that stem forever, the next cycle laddered
+    one rung up, and the whole recording was fetched again — every cycle.
+    """
+    from transcript_analyzer.pipeline import lecture as lecture_mod
+    from transcript_analyzer.pipeline.llm import LLMResponseError
+
+    cfg = _pocket_cfg(cfg)
+    transcript = _transcript()
+    old_note, old_audio = _seed_previous_note(cfg, transcript, "Old lecture name")
+    old_study = writer.write_study_note(cfg, old_note, transcript.id, "notes")
+    writer.write_study_pdf(old_study, transcript.id, b"%PDF ours")
+
+    new_insight = Insight(headline="Row reducing a 3x3 matrix", summary="New.",
+                          kind="lecture")
+    monkeypatch.setattr(sync, "extract_insight", lambda *a, **k: new_insight)
+
+    failing = True
+
+    def produce(*a, **k):
+        if failing:
+            raise LLMResponseError("Claude returned invalid JSON")
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(lecture_mod, "produce", produce)
+
+    before = {p: p.read_bytes() for p in cfg.vault.insights_path.rglob("*")
+              if p.is_file()}
+    with pytest.raises(LLMResponseError):
+        sync.process_transcript(cfg, transcript, llm=None)
+
+    after = {p: p.read_bytes() for p in cfg.vault.insights_path.rglob("*")
+             if p.is_file()}
+    assert after == before, "a failing lecture pass mutated the vault"
+    assert old_note.exists() and old_audio.exists() and old_study.exists()
+
+    # The retry reuses the SAME stem: nothing poisoned it.
+    failing = False
+    monkeypatch.setattr(sync, "_study_notes_for", lambda *a, **k: (None, ""))
+    res = sync.process_transcript(cfg, transcript, llm=None)
+    new_note = Path(res["note_path"])
+    assert new_note == writer.note_path_for(cfg, transcript, new_insight)
+    assert "(t1" not in new_note.stem, f"the claim ladder advanced: {new_note.name}"
+    assert writer.audio_path_for(cfg, new_note).read_bytes() == b"ID3-fake-mp3-bytes"
+    assert not old_audio.exists()
+
+
+def test_fresh_study_notes_are_not_clobbered_by_the_rename_move(cfg, monkeypatch):
+    """The pass now claims the destination stem before the move would run."""
+    from transcript_analyzer.pipeline import lecture as lecture_mod
+
+    transcript = _transcript()
+    old_note, _old_audio = _seed_previous_note(cfg, transcript, "Old lecture name")
+    old_study = writer.write_study_note(cfg, old_note, transcript.id, "stale notes")
+
+    new_insight = Insight(headline="Row reducing a 3x3 matrix", summary="New.",
+                          kind="lecture")
+    monkeypatch.setattr(sync, "extract_insight", lambda *a, **k: new_insight)
+
+    def produce(cfg_, t, ins, note_path, llm=None, **k):
+        from transcript_analyzer.models import StudyNotes
+
+        study_path = writer.write_study_note(cfg_, note_path, t.id, "fresh notes")
+        return lecture_mod.StudyOutcome(notes=StudyNotes(overview="Fresh."),
+                                        study_path=study_path)
+
+    monkeypatch.setattr(lecture_mod, "produce", produce)
+    res = sync.process_transcript(cfg, transcript, llm=None)
+
+    new_note = Path(res["note_path"])
+    fresh = writer.study_note_path_for(cfg, new_note)
+    assert fresh != old_study
+    assert "fresh notes" in fresh.read_text(), "the move overwrote what the pass wrote"
+    assert f"[[{fresh.stem}|Full study notes]]" in new_note.read_text()

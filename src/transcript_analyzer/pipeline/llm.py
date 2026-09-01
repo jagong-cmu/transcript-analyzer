@@ -67,6 +67,18 @@ class LLMResponseError(LLMError):
     """The API answered but the response was unusable (e.g. bad JSON)."""
 
 
+class LLMTruncatedError(LLMResponseError):
+    """The answer was cut off at max_tokens.
+
+    Its own TYPE because it is DETERMINISTIC where the rest of
+    `LLMResponseError` is transient: the same transcript, the same cap and the
+    same prompt overflow the same way every time, so a caller that retries it
+    pays again — at the lecture stage, a 32k-output Opus 5 call every sync
+    cycle — for an answer that cannot change. Callers test the type; nothing
+    matches on the message.
+    """
+
+
 def _month() -> str:
     return datetime.now().strftime("%Y-%m")
 
@@ -333,7 +345,7 @@ class LLM:
 
     def _parse_json_message(self, msg: Any) -> dict:
         if msg.stop_reason == "max_tokens":
-            raise LLMResponseError(
+            raise LLMTruncatedError(
                 "Structured output truncated at max_tokens; raise the limit."
             )
         text = "".join(b.text for b in msg.content if b.type == "text")
