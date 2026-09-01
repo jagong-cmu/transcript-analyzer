@@ -245,6 +245,11 @@ bash scripts/install_launchd.sh uninstall
   between its own markers.
 - Insight-extraction failures are counted (`insight_failures_total` in the meta table) and
   surfaced in sync logs — an LLM failure never silently writes an empty note.
+- A response cut off at the model's output cap is *deterministic* — the same recording would
+  overflow again every cycle — so it is recorded instead of retried, and billed once. The note
+  is written with a visible warning callout and a queryable `extract_error:` /
+  `study_notes_error:` key, keeping whatever the last complete pass wrote (summary, key points,
+  action items, and the filename) rather than downgrading it.
 - Nothing is written, renamed or deleted at a vault path that is not provably that
   transcript's own. A study note carries `transcript_id`; the PDF beside it is claimed through
   that note, exactly as an mp3 in `Attachments/` is claimed through the note at its stem.

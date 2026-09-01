@@ -110,7 +110,7 @@ across the Python versions `pyproject` declares (3.10–3.12) — a change has t
   and carries ticked checkboxes across (ticking one is how a commitment is closed — reopening
   it is data loss). A note that predates the markers has its tail recovered from the end of the
   transcript callout, which is why `writer.transcript_bounds` is one definition used by the
-  writer, `indexer._extract_transcript` and `scripts/backfill_timestamps.py` alike. Only a note
+  writer, `indexer.extract_transcript` and `scripts/backfill_timestamps.py` alike. Only a note
   we can PROVE is ours is ever read for that content. Study notes an EARLIER run left are
   carried the same way: `study_stem_name` means "what this run produced", and when it is absent
   `write_note` re-links whatever `resolve_study_note_path` proves is still ours (with the PDF
