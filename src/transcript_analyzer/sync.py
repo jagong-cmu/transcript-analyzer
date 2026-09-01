@@ -190,6 +190,42 @@ def _known_courses(cfg: Config) -> dict:
         return index_courses(known_course_rows(conn))
 
 
+def _insight_for(
+    cfg: Config, transcript: Transcript, llm: LLM
+) -> tuple[Insight, str]:
+    """(insight, terminal failure reason) for the extraction pass.
+
+    The SAME deterministic-failure rule the lecture stage follows, at the stage
+    that runs on every transcript. A response cut off at the output cap is not
+    transient: the same transcript against the same cap overflows identically
+    forever, so letting it propagate to `sync`'s per-transcript handler means
+    `record_sync` is never reached and the next cycle buys the same overflow
+    again, every interval, until the monthly ceiling halts ingestion for
+    everything else.
+
+    So it is recorded instead of retried: an empty insight comes back with the
+    reason, the note is written from what the recording itself carries — its
+    title, its date and its full transcript — and `record_sync` is reached, so
+    it bills ONCE. The note says where its summary went rather than showing an
+    empty one; `render_note(extract_error=…)` is what makes it visibly
+    incomplete instead of quietly wrong.
+
+    Kill-switch and budget errors still propagate untouched, and every other
+    failure still reaches the caller's handler unchanged.
+    """
+    try:
+        return extract_insight(
+            transcript, cfg, llm=llm, known_courses=_known_courses(cfg)
+        ), ""
+    except LLMTruncatedError as e:
+        _log.warning(
+            "extraction for %r overflowed the output cap (%s); writing a marked "
+            "note rather than paying for the same overflow every cycle",
+            transcript.title, e,
+        )
+        return Insight(), str(e)
+
+
 def _study_attempts_key(transcript_id: str) -> str:
     return f"study_attempts:{transcript_id}"
 
@@ -273,9 +309,7 @@ def process_transcript(
     *,
     dry_run: bool = False,
 ) -> dict:
-    insight = extract_insight(
-        transcript, cfg, llm=llm, known_courses=_known_courses(cfg)
-    )
+    insight, extract_error = _insight_for(cfg, transcript, llm)
     display = compose_display_title(
         insight.headline or transcript.title, transcript.date
     )
@@ -288,6 +322,7 @@ def process_transcript(
         "study_notes": None,
         "study_pdf": None,
         "study_error": None,
+        "extract_error": extract_error or None,
     }
     if dry_run:
         return result
@@ -347,6 +382,7 @@ def process_transcript(
         study_stem_name=study.stem if study else None,
         has_study_pdf=bool(study and study.pdf_path),
         study_error=study_error,
+        extract_error=extract_error,
         asr_repairs=study.notes.asr_repairs if study else None,
     )
     result["note_path"] = str(note_path)

@@ -5,6 +5,9 @@ Playwright Chromium or the cached render assets are not available (CI installs
 the package but not the browser), so the deterministic gates in
 test_lecture_profile.py stay the ones that always run.
 """
+import shutil
+import subprocess
+import time
 from datetime import date
 from pathlib import Path
 
@@ -119,3 +122,135 @@ def test_an_unavailable_asset_cache_is_a_render_error_not_an_escape(monkeypatch,
     monkeypatch.setattr(assets, "stage_assets", no_assets)
     with pytest.raises(pdf.PdfRenderError, match="cdn unreachable"):
         pdf.render_pdf("<html></html>", tmp_path)
+
+
+def test_a_visual_that_will_not_settle_loses_to_the_deadline(render_dir, monkeypatch):
+    """The diagram loop is bounded INSIDE the page, because it cannot be
+    bounded from Python.
+
+    `Page.evaluate` takes no timeout, so `page.set_default_timeout` never
+    covered the mermaid/KaTeX loop — the exact step a pathological source
+    spins in. Unbounded, an unattended sync wedges on one lecture forever with
+    no error and no log line. The deadline is shortened here so the bound is
+    what ends the test, not a real spin.
+    """
+    monkeypatch.setattr(pdf, "RENDER_TIMEOUT_MS", 250)
+    notes = notes_with(
+        Visual(kind="mermaid", caption="Fine.", source="flowchart TD\n  A-->B")
+    )
+    html = study.study_html(notes, title="Lecture", when=date(2026, 9, 1))
+    # A script that never yields: the render loop cannot finish, so the
+    # deadline must be what resolves the page.
+    stuck = html.replace(
+        "</body>",
+        "<script>window.mermaid.render = () => new Promise(() => {});</script></body>",
+    )
+    assert stuck != html, "the probe was not injected"
+
+    started = time.monotonic()
+    with pytest.raises(pdf.PdfRenderError) as caught:
+        pdf.render_pdf(stuck, render_dir)
+
+    assert "exceeded" in str(caught.value)
+    assert time.monotonic() - started < 60, "the deadline did not end the render"
+
+
+def test_a_tripped_deadline_reaches_the_caller_as_a_render_error(monkeypatch, tmp_path):
+    """Browser-free half of the same contract.
+
+    However the page-level failure arrives, `lecture.produce` only catches
+    PdfRenderError — anything else discards the whole paid study-notes result
+    instead of the PDF alone.
+    """
+    playwright = pytest.importorskip("playwright.sync_api")
+    monkeypatch.setattr(pdf, "playwright_available", lambda: True)
+    monkeypatch.setattr(assets, "stage_assets", lambda data_dir, dest: None)
+
+    def deadline_tripped(*a, **k):
+        raise playwright.Error("study-notes render exceeded 250ms")
+
+    monkeypatch.setattr(pdf, "sync_playwright", deadline_tripped, raising=False)
+    import playwright.sync_api as pw
+
+    monkeypatch.setattr(pw, "sync_playwright", deadline_tripped)
+    with pytest.raises(pdf.PdfRenderError, match="exceeded"):
+        pdf.render_pdf("<html></html>", tmp_path)
+
+
+NODE_HARNESS = """
+const figure = { id: 'viz1', remove() {} };
+const el = {
+  dataset: { src: 'flowchart TD\\n A-->B' },
+  closest: () => figure,
+  querySelector: () => ({}),
+  set innerHTML(_v) {},
+};
+global.document = {
+  querySelectorAll: (sel) => (sel === '.viz-mermaid' ? [el] : []),
+};
+global.window = {
+  katex: { render() {} },
+  mermaid: {
+    initialize() {},
+    parse: async () => true,
+    // Never settles: exactly the pathological layout the deadline exists for.
+    render: () => new Promise(() => {}),
+  },
+};
+const started = Date.now();
+render(%(deadline)d).then(
+  () => console.log('RESOLVED'),
+  (e) => console.log('REJECTED ' + (Date.now() - started) + ' ' + e.message),
+);
+"""
+
+
+def test_the_render_loop_rejects_when_it_cannot_settle(tmp_path):
+    """The bound itself, executed — no browser and no real spin.
+
+    `_RENDER_JS` is the generated program handed to the page, so running it is
+    running the interface. With `mermaid.render` never settling, the deadline
+    has to be what resolves it; unbounded, `page.evaluate` would hang the
+    unattended sync forever with no error and no log line.
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not available to execute the page script")
+
+    script = tmp_path / "probe.js"
+    script.write_text(
+        f"const render = {pdf._RENDER_JS};\n" + NODE_HARNESS % {"deadline": 200},
+        encoding="utf-8",
+    )
+    out = subprocess.run(
+        [node, str(script)], capture_output=True, text=True, timeout=30
+    )
+    assert out.returncode == 0, out.stderr
+
+    verdict = out.stdout.strip()
+    assert verdict.startswith("REJECTED"), f"the loop was never bounded: {verdict!r}"
+    _, elapsed_ms, *rest = verdict.split(" ", 2)
+    assert int(elapsed_ms) < 5_000, "the deadline did not fire promptly"
+    assert "exceeded 200ms" in " ".join(rest)
+
+
+def test_the_render_loop_returns_normally_when_it_settles(tmp_path):
+    """The guard: the deadline must not pre-empt a render that works."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not available to execute the page script")
+
+    script = tmp_path / "probe_ok.js"
+    harness = NODE_HARNESS.replace(
+        "render: () => new Promise(() => {}),",
+        "render: async () => ({ svg: '<svg/>' }),",
+    )
+    script.write_text(
+        f"const render = {pdf._RENDER_JS};\n" + harness % {"deadline": 5_000},
+        encoding="utf-8",
+    )
+    out = subprocess.run(
+        [node, str(script)], capture_output=True, text=True, timeout=30
+    )
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "RESOLVED"

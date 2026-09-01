@@ -385,3 +385,60 @@ def test_a_retryable_lecture_failure_is_bounded_not_endless(no_pdf_cfg):
     res = run(cfg, BadJson(payload), t)
     assert "invalid JSON" in res["study_error"]
     assert "could not be generated" in Path(res["note_path"]).read_text()
+
+
+def test_a_truncated_extraction_bills_once_and_marks_the_note(no_pdf_cfg, monkeypatch):
+    """The deterministic-failure rule, at the stage that runs on EVERY transcript.
+
+    Extraction cut off at its output cap overflows identically forever. Letting
+    it propagate meant `record_sync` was never reached, so the next cycle
+    bought the same overflow again — every interval, until the monthly ceiling
+    halted ingestion for everything else.
+    """
+    from transcript_analyzer.pipeline.llm import LLMTruncatedError
+
+    cfg = no_pdf_cfg
+    # Long enough to clear the ingest-time quality floor, so the run reaches
+    # the extraction call rather than being filtered as junk.
+    t = transcript(
+        "trunc1", LECTURE_TEXT * 4, "A recording whose extraction overflows"
+    )
+
+    class TruncatingLLM(StubLLM):
+        def chat_json(self, system, user, schema, *, max_tokens=None, stage="", stream=False):
+            self.stages.append(stage)
+            raise LLMTruncatedError(
+                "Structured output truncated at max_tokens; raise the limit."
+            )
+
+    llm = TruncatingLLM(extraction("lecture"))
+    monkeypatch.setattr(sync, "LLM", lambda cfg: llm)
+    monkeypatch.setattr(sync, "_iter_source", lambda *a, **k: iter([t]))
+
+    first = sync.sync(cfg, sources=["pocket"], synthesize_after=False, verbose=False)
+    assert first["processed"] == 1 and first["skipped"] == 0
+    assert llm.stages == ["extract"], "a lecture call was bought on an empty insight"
+
+    # The whole point: the second cycle short-circuits on the recorded hash.
+    second = sync.sync(cfg, sources=["pocket"], synthesize_after=False, verbose=False)
+    assert second["processed"] == 0 and second["skipped"] == 1
+    assert llm.stages == ["extract"], "the same overflow was paid for twice"
+
+    note = Path(first["items"][0]["note_path"])
+    body = note.read_text()
+    assert "extract_error:" in body
+    assert "truncated at max_tokens" in body
+    assert "no summary" in body
+    # Visibly incomplete, never an empty summary passed off as a real one.
+    assert "_No summary._" not in body
+    # And what the recording itself carries is still all there.
+    assert "A recording whose extraction overflows" in body
+    assert "row reducing a three by three matrix" in body
+
+
+def test_a_healthy_extraction_carries_no_marker(no_pdf_cfg):
+    """The guard: the marker appears only when the pass actually failed."""
+    res = run(no_pdf_cfg, StubLLM(extraction("meeting")),
+              transcript("ok1", MEETING_TEXT, "Sync"))
+    body = Path(res["note_path"]).read_text()
+    assert "extract_error:" not in body and res["extract_error"] is None

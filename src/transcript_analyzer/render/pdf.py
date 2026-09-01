@@ -23,8 +23,16 @@ from . import assets
 
 _log = logging.getLogger(__name__)
 
-# A pathological mermaid source can spin in layout; the page as a whole is
-# bounded so an unattended sync can never wedge on one lecture.
+# What is actually bounded, and by what — because a false reassurance here is
+# worse than none. `page.set_default_timeout` only governs Playwright calls
+# that TAKE a timeout, which among the ones below is `page.goto` alone:
+# `Page.evaluate` and `Page.pdf` accept none (checked against the installed
+# playwright, whose `pdf` sends a bare channel message). So the diagram loop —
+# the step a pathological mermaid source would spin in — is bounded INSIDE the
+# page instead, by `_RENDER_JS` racing itself against this deadline and
+# rejecting when it wins. Chromium's own print step is the one part still
+# unbounded from here; it runs after the loop has provably finished, on a page
+# that is already laid out.
 RENDER_TIMEOUT_MS = 60_000
 PDF_MARGIN = "16mm"
 
@@ -61,45 +69,67 @@ class RenderResult:
 # Runs inside the page, after both libraries have loaded. Returns the ids of
 # the figures it removed, so the caller can report what was dropped rather
 # than shipping a PDF that quietly lost half its diagrams.
+#
+# The whole loop races a deadline the caller supplies, because `page.evaluate`
+# cannot be bounded from Python: a mermaid source that spins in layout would
+# otherwise hang the unattended sync forever with no error and no log line.
+# Losing the race rejects, which reaches the caller as a PlaywrightError and
+# becomes a PdfRenderError — so the markdown study notes are still written.
 _RENDER_JS = r"""
-async () => {
-  if (typeof window.mermaid === 'undefined') throw new Error('mermaid did not load');
-  if (typeof window.katex === 'undefined') throw new Error('katex did not load');
-  window.mermaid.initialize({
-    startOnLoad: false,
-    securityLevel: 'strict',
-    theme: 'neutral',
-    fontFamily: 'system-ui, -apple-system, Helvetica, Arial, sans-serif',
+async (deadlineMs) => {
+  let timer;
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error('study-notes render exceeded ' + deadlineMs + 'ms')),
+      deadlineMs,
+    );
   });
-  const dropped = [];
-  const drop = (fig, why) => { dropped.push({ id: fig.id, reason: why }); fig.remove(); };
 
-  let n = 0;
-  for (const el of Array.from(document.querySelectorAll('.viz-mermaid'))) {
-    const fig = el.closest('figure');
-    const src = el.dataset.src || '';
-    try {
-      await window.mermaid.parse(src);
-      const { svg } = await window.mermaid.render('m' + (n++), src);
-      el.innerHTML = svg;
-      if (!el.querySelector('svg')) { drop(fig, 'mermaid produced no svg'); }
-    } catch (e) {
-      drop(fig, 'mermaid: ' + (e && e.message ? e.message : String(e)));
-    }
-  }
+  const render = async () => {
+    if (typeof window.mermaid === 'undefined') throw new Error('mermaid did not load');
+    if (typeof window.katex === 'undefined') throw new Error('katex did not load');
+    window.mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: 'strict',
+      theme: 'neutral',
+      fontFamily: 'system-ui, -apple-system, Helvetica, Arial, sans-serif',
+    });
+    const dropped = [];
+    const drop = (fig, why) => { dropped.push({ id: fig.id, reason: why }); fig.remove(); };
 
-  for (const el of Array.from(document.querySelectorAll('.viz-math'))) {
-    const fig = el.closest('figure');
-    try {
-      window.katex.render(el.dataset.src || '', el, {
-        throwOnError: true, displayMode: true,
-      });
-      if (!el.querySelector('.katex')) { drop(fig, 'katex produced no output'); }
-    } catch (e) {
-      drop(fig, 'katex: ' + (e && e.message ? e.message : String(e)));
+    let n = 0;
+    for (const el of Array.from(document.querySelectorAll('.viz-mermaid'))) {
+      const fig = el.closest('figure');
+      const src = el.dataset.src || '';
+      try {
+        await window.mermaid.parse(src);
+        const { svg } = await window.mermaid.render('m' + (n++), src);
+        el.innerHTML = svg;
+        if (!el.querySelector('svg')) { drop(fig, 'mermaid produced no svg'); }
+      } catch (e) {
+        drop(fig, 'mermaid: ' + (e && e.message ? e.message : String(e)));
+      }
     }
+
+    for (const el of Array.from(document.querySelectorAll('.viz-math'))) {
+      const fig = el.closest('figure');
+      try {
+        window.katex.render(el.dataset.src || '', el, {
+          throwOnError: true, displayMode: true,
+        });
+        if (!el.querySelector('.katex')) { drop(fig, 'katex produced no output'); }
+      } catch (e) {
+        drop(fig, 'katex: ' + (e && e.message ? e.message : String(e)));
+      }
+    }
+    return { dropped, kept: document.querySelectorAll('figure[data-viz]').length };
+  };
+
+  try {
+    return await Promise.race([render(), deadline]);
+  } finally {
+    clearTimeout(timer);
   }
-  return { dropped, kept: document.querySelectorAll('figure[data-viz]').length };
 }
 """
 
@@ -149,8 +179,12 @@ def render_pdf(html: str, data_dir: Path) -> RenderResult:
                 try:
                     page = browser.new_page()
                     page.set_default_timeout(RENDER_TIMEOUT_MS)
-                    page.goto(page_path.as_uri(), wait_until="load")
-                    outcome = page.evaluate(_RENDER_JS)
+                    page.goto(
+                        page_path.as_uri(),
+                        wait_until="load",
+                        timeout=RENDER_TIMEOUT_MS,
+                    )
+                    outcome = page.evaluate(_RENDER_JS, RENDER_TIMEOUT_MS)
                     pdf = page.pdf(
                         format="A4",
                         print_background=True,

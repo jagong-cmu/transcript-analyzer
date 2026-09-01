@@ -141,18 +141,23 @@ across the Python versions `pyproject` declares (3.10–3.12) — a change has t
   superseded ones over what was just generated. The same rule makes `LLMResponseError` a
   PER-NOTE failure in `scripts/backfill_summaries.py`: only the kill switch and the budget end
   a run, since a `--batch` run has already been billed for every payload it would discard.
-- **A DETERMINISTIC failure is not retried; it is recorded in the note.** `LLMTruncatedError`
-  (raised by `llm._parse_json_message` on `stop_reason == "max_tokens"`) is its own type
-  because the same transcript against the same cap overflows identically forever — retrying it
-  re-bills a 32k-output Opus 5 call every sync interval until `monthly_budget_usd` halts
-  ingestion for everything else. `sync._study_notes_for` makes it terminal on the first
-  attempt: the note is written with `render_note(study_error=…)` — a visible `## Study Notes`
-  warning plus a queryable `study_notes_error:` — and `record_sync` is reached, so it bills
-  ONCE. An unusable response that might be transient is retried up to
-  `sync.STUDY_NOTE_MAX_ATTEMPTS` and then gets the same terminal marker. The marker never
-  implies notes exist; when a previous run's notes are still provably on disk they stay linked
-  and it reads as a failed refresh. Raising `lecture_max_tokens` is not the fix — a
-  deterministic overflow can exceed any cap.
+- **A DETERMINISTIC failure is not retried; it is recorded in the note. This holds for EVERY
+  stage, not just the one that found it first.** `LLMTruncatedError` (raised by
+  `llm._parse_json_message` on `stop_reason == "max_tokens"`) is its own type because the same
+  transcript against the same cap overflows identically forever — retrying it re-bills that
+  stage every sync interval until `monthly_budget_usd` halts ingestion for everything else.
+  Any stage that can raise it therefore owes three things: catch it where the note write is
+  decided, write the note carrying a VISIBLE marker plus a queryable frontmatter key, and let
+  `record_sync` be reached so it bills ONCE. Two call sites implement that rule today —
+  `sync._insight_for` (`render_note(extract_error=…)`, `extract_error:`; the note falls back to
+  the recording's own title, date and full transcript rather than showing an empty summary) and
+  `sync._study_notes_for` (`render_note(study_error=…)`, `study_notes_error:`). A new stage
+  inherits the rule; it does not get to re-derive it. An unusable response that MIGHT be
+  transient is different: bounded retries (`sync.STUDY_NOTE_MAX_ATTEMPTS`) ending in the same
+  terminal marker. `LLMKillSwitchError` / `LLMBudgetError` always propagate untouched. A marker
+  never implies output exists — when a previous run's study notes are still provably on disk
+  they stay linked and it reads as a failed refresh. Raising the stage's `max_tokens` is not
+  the fix: a deterministic overflow can exceed any cap.
 - **Models and effort are per STAGE, not global.** `LLM.create/stream/chat_json` take
   `stage=` and resolve the model and `output_config.effort` from
   `[anthropic.stage_models]` / `[anthropic.stage_effort]`; `_record` prices the model that

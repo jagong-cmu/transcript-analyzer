@@ -615,6 +615,7 @@ def render_note(
     study_stem_name: str | None = None,
     has_study_pdf: bool = False,
     study_error: str = "",
+    extract_error: str = "",
     asr_repairs: list | None = None,
     checked: frozenset[str] = frozenset(),
 ) -> str:
@@ -639,6 +640,12 @@ def render_note(
     profile exists to avoid. It never implies notes exist: with a study stem
     it reads as a failed refresh of notes still on disk, without one as notes
     that were never produced.
+
+    `extract_error` is the same contract one stage earlier: extraction itself
+    came back unusable, so there is no headline, summary or key point to show.
+    The note is still written — it carries the recording's own title, date and
+    full transcript — but it says so where the summary would have been, rather
+    than presenting an empty one as if the recording had nothing in it.
     """
     people_links = [_wikilink(p) for p in insight.people]
     headline = note_headline(transcript, insight)
@@ -689,6 +696,8 @@ def render_note(
         fm_lines.append(f"study_notes: {_yaml_str(study_stem_name)}")
     if study_error:
         fm_lines.append(f"study_notes_error: {_yaml_str(_one_line(study_error))}")
+    if extract_error:
+        fm_lines.append(f"extract_error: {_yaml_str(_one_line(extract_error))}")
     if insight.sentiment:
         fm_lines.append(f"sentiment: {insight.sentiment}")
     fm_lines.append("---")
@@ -720,10 +729,15 @@ def render_note(
         body.append(f"> {_one_line(study_error)}")
         body.append("")
     body.append("## Summary")
-    body.append(
-        _body_text(insight.detailed_summary or insight.summary, within="## Summary")
-        or "_No summary._"
-    )
+    if extract_error:
+        body.append("> [!warning] The extraction pass was cut off, so this note has no summary.")
+        body.append(f"> {_one_line(extract_error)}")
+        body.append("> The full transcript below is complete and unaffected.")
+    else:
+        body.append(
+            _body_text(insight.detailed_summary or insight.summary, within="## Summary")
+            or "_No summary._"
+        )
     body.append("")
     body.append("## Key Points")
     body.extend([f"- {kp}" for kp in key_points] or ["- _None._"])
@@ -857,6 +871,7 @@ def write_note(
     study_stem_name: str | None = None,
     has_study_pdf: bool = False,
     study_error: str = "",
+    extract_error: str = "",
     asr_repairs: list | None = None,
 ) -> Path:
     """Write the note, at `path` when the caller already claimed one.
@@ -931,6 +946,7 @@ def write_note(
         study_stem_name=study_stem_name,
         has_study_pdf=has_study_pdf,
         study_error=study_error,
+        extract_error=extract_error,
         asr_repairs=asr_repairs,
         checked=checked,
     )
