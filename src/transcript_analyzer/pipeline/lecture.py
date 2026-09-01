@@ -48,6 +48,9 @@ _log = logging.getLogger(__name__)
 
 # A span shorter than this proves nothing — "the" appears in every transcript.
 MIN_ANCHOR_CHARS = 12
+# Cost sanity cap, matching the extraction pass. Lectures run 9.7k-45k chars,
+# so this never bites in practice; it bounds a pathological transcript.
+MAX_TRANSCRIPT_CHARS = 100_000
 # Mermaid sources longer than this are never a lecture diagram; they are a
 # runaway generation, and they are what makes a browser render hang.
 MAX_VISUAL_CHARS = 4_000
@@ -277,11 +280,14 @@ def build_study_notes(
     course = ""
     if insight.course_code or insight.course_name:
         course = f"Course: {insight.course_code} {insight.course_name}".strip() + "\n"
+    text = transcript.text
+    if len(text) > MAX_TRANSCRIPT_CHARS:
+        text = text[:MAX_TRANSCRIPT_CHARS] + "\n...[truncated]"
     user = USER_TEMPLATE.format(
         title=insight.headline or transcript.title,
         course=course,
         date=transcript.date.isoformat(),
-        text=transcript.text,
+        text=text,
     )
     system = SYSTEM.format(
         min_visuals=cfg.lecture.min_visuals, max_visuals=cfg.lecture.max_visuals
@@ -296,7 +302,10 @@ def build_study_notes(
         # thinking on; a non-streaming request would race the HTTP timeout.
         stream=True,
     )
-    return study_notes_from_payload(data, transcript.text, cfg)
+    # The gate checks against exactly the text the model was SHOWN. Handing it
+    # the untruncated transcript would let a span the model could not have
+    # copied still pass — the gate would be wider than the evidence.
+    return study_notes_from_payload(data, text, cfg)
 
 
 def study_notes_from_payload(
