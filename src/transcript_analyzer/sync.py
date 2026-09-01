@@ -34,7 +34,12 @@ from .obsidian import writer
 from .pipeline import lecture
 from .pipeline.indexer import index_note
 from .pipeline.insights import extract_insight
-from .pipeline.llm import LLM, LLMBudgetError, LLMKillSwitchError
+from .pipeline.llm import (
+    LLM,
+    LLMBudgetError,
+    LLMKillSwitchError,
+    LLMResponseError,
+)
 from .pipeline.quality import junk_reason
 from .titles import compose_display_title
 
@@ -184,15 +189,22 @@ def _study_notes_for(
     """The lecture profile, or None when this is not a lecture we can serve.
 
     Budget and kill-switch errors PROPAGATE — they mean stop, and the caller's
-    handler stops the whole pass. Anything else is contained: a note with a
-    detailed summary and no study notes is still the deliverable, and the
-    alternative is losing the transcript entirely over a diagram.
+    handler stops the whole pass. So does a truncated or unparseable response:
+    it was cut off at `lecture_max_tokens`, so the right outcome is to fail
+    this transcript, leave `record_sync` unreached, and let the next cycle
+    reprocess it — not to silently write a downgraded note and then skip the
+    recording forever because its hash was recorded as done.
+
+    Anything else is contained: a note with a detailed summary and no study
+    notes is still the deliverable, and the alternative is losing the
+    transcript entirely over a diagram. A renderer failure never reaches here
+    at all — `lecture.produce` handles it and still writes the markdown.
     """
     if not (insight.is_lecture and cfg.lecture.enabled):
         return None
     try:
         return lecture.produce(cfg, transcript, insight, note_path, llm)
-    except (LLMKillSwitchError, LLMBudgetError):
+    except (LLMKillSwitchError, LLMBudgetError, LLMResponseError):
         raise
     except Exception as e:  # noqa: BLE001 - study notes must not cost the note
         _log.warning(

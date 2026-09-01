@@ -111,7 +111,13 @@ across the Python versions `pyproject` declares (3.10–3.12) — a change has t
   it is data loss). A note that predates the markers has its tail recovered from the end of the
   transcript callout, which is why `writer.transcript_bounds` is one definition used by the
   writer, `indexer._extract_transcript` and `scripts/backfill_timestamps.py` alike. Only a note
-  we can PROVE is ours is ever read for that content.
+  we can PROVE is ours is ever read for that content. Study notes an EARLIER run left are
+  carried the same way: `study_stem_name` means "what this run produced", and when it is absent
+  `write_note` re-links whatever `resolve_study_note_path` proves is still ours (with the PDF
+  link gated on the `.pdf` existing, and `asr_repairs:` read back off our own frontmatter).
+  That lives in `write_note`, not in its callers, because it is the only place that knows which
+  path was FINALLY claimed — a lecture pass that is off, skipped or contained must not make the
+  note claim study notes are gone while the dashboard still serves them.
 - **A diagram renders or it is dropped.** The transcript has no visual channel, so every
   diagram is reconstructed from speech. `render/pdf.py` validates each spec in the same page it
   is about to print (`mermaid.parse`, KaTeX with `throwOnError`) and removes the whole figure —

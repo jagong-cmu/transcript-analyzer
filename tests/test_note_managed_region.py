@@ -159,3 +159,103 @@ def test_a_transcript_that_quotes_the_end_marker_does_not_split_the_note(cfg):
     assert once.count(writer.NOTE_BEGIN) == 1
     assert once.count("Kept.") == 1
     assert indexer.parse_note(path).transcript_text == spoken
+
+
+# ---------- study notes an earlier run left are carried across too ----------
+
+
+def with_study(cfg, path, *, pdf=True, repairs=True):
+    """Regenerate `path` as a lecture that produced study notes and a PDF."""
+    study = writer.write_study_note(cfg, path, TID, "study notes body")
+    if pdf:
+        writer.write_study_pdf(study, TID, b"%PDF-1.4 rendered")
+    from transcript_analyzer.models import AsrRepair
+
+    return writer.write_note(
+        cfg, transcript(), insight(), path=path,
+        study_stem_name=study.stem,
+        has_study_pdf=pdf,
+        asr_repairs=[AsrRepair(heard="new age of AR", corrected="new age of AI")]
+        if repairs else [],
+    )
+
+
+def test_a_run_with_no_lecture_pass_keeps_the_study_notes_already_on_disk(cfg):
+    """The dashboard still serves them; the note must not claim they are gone.
+
+    `[lecture] enabled = false`, a contained failure, or simply a re-sync all
+    reach `write_note` with no study notes — but the markdown and the PDF are
+    still in the vault, still provably this transcript's.
+    """
+    path = cfg.vault.insights_path / "2026-09-01 lecture.md"
+    writer.write_note(cfg, transcript(), insight(), path=path)
+    with_study(cfg, path)
+
+    # A later regeneration where the lecture pass produced nothing at all.
+    writer.write_note(cfg, transcript("[0:01] Angela: new words."), insight(), path=path)
+
+    text = path.read_text()
+    stem = writer.study_note_path_for(cfg, path).stem
+    assert f"[[{stem}|Full study notes]]" in text
+    assert f"[[{stem}.pdf|Printable PDF]]" in text
+    assert f'study_notes: "{stem}"' in text
+    # The audit trail for those notes survives with them.
+    assert "new age of AR" in text and "new age of AI" in text
+
+
+def test_the_carried_pdf_link_still_tracks_whether_the_pdf_exists(cfg):
+    """Carrying the link must not resurrect a download the vault cannot serve."""
+    path = cfg.vault.insights_path / "2026-09-01 lecture.md"
+    writer.write_note(cfg, transcript(), insight(), path=path)
+    with_study(cfg, path, pdf=False)
+
+    writer.write_note(cfg, transcript("[0:01] Angela: new words."), insight(), path=path)
+
+    text = path.read_text()
+    assert "|Full study notes]]" in text
+    assert "Printable PDF" not in text
+
+
+def test_no_study_notes_on_disk_invents_no_link(cfg):
+    path = cfg.vault.insights_path / "2026-09-01 plain.md"
+    writer.write_note(cfg, transcript(), insight(), path=path)
+    writer.write_note(cfg, transcript("[0:01] Angela: new words."), insight(), path=path)
+
+    text = path.read_text()
+    assert "## Study Notes" not in text and "study_notes:" not in text
+
+
+def test_study_notes_that_are_not_ours_are_never_linked(cfg):
+    """Ownership gates the carry-across exactly as it gates the tail."""
+    path = cfg.vault.insights_path / "2026-09-01 lecture.md"
+    writer.write_note(cfg, transcript(), insight(), path=path)
+    stranger = writer.study_note_path_for(cfg, path)
+    stranger.parent.mkdir(parents=True, exist_ok=True)
+    stranger.write_text(
+        "---\nsynth: true\ntranscript_id: someone-else\n---\n\n# Theirs\n",
+        encoding="utf-8",
+    )
+    writer.study_pdf_for(stranger).write_bytes(b"%PDF theirs")
+
+    writer.write_note(cfg, transcript("[0:01] Angela: new words."), insight(), path=path)
+
+    text = path.read_text()
+    assert "## Study Notes" not in text and "study_notes:" not in text
+    assert "Theirs" in stranger.read_text()
+
+
+def test_a_fresh_lecture_pass_replaces_the_carried_repairs(cfg):
+    """Carrying across is a fallback, never an override of what this run made."""
+    path = cfg.vault.insights_path / "2026-09-01 lecture.md"
+    writer.write_note(cfg, transcript(), insight(), path=path)
+    with_study(cfg, path)
+
+    study = writer.study_note_path_for(cfg, path)
+    writer.write_note(
+        cfg, transcript(), insight(), path=path,
+        study_stem_name=study.stem, has_study_pdf=True, asr_repairs=[],
+    )
+
+    text = path.read_text()
+    assert "asr_repairs:" not in text
+    assert f"[[{study.stem}|Full study notes]]" in text

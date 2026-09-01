@@ -21,10 +21,11 @@ from itertools import islice
 from pathlib import Path
 from typing import Iterator
 
+import frontmatter
 from slugify import slugify
 
 from ..config import Config
-from ..models import Insight, Transcript
+from ..models import AsrRepair, Insight, Transcript
 from ..titles import clean_headline, compose_display_title, format_long_date
 
 _log = logging.getLogger(__name__)
@@ -767,6 +768,44 @@ def _checked_items(path: Path) -> frozenset[str]:
     return frozenset(t for t, done in parse_action_items(text) if done)
 
 
+def _existing_study_link(
+    cfg: Config, note_path: Path, transcript_id: str
+) -> tuple[str | None, bool]:
+    """(study stem, whether its PDF exists) for study notes already on disk.
+
+    Resolved through `resolve_study_note_path`, so the ladder is walked and
+    `owns_note` is the proof — a stem that is not provably this transcript's
+    answers None and is never linked.
+    """
+    study = resolve_study_note_path(cfg, note_path, transcript_id)
+    if study is None:
+        return None, False
+    return study.stem, study_pdf_for(study).exists()
+
+
+def _existing_asr_repairs(path: Path) -> list[AsrRepair]:
+    """The ASR repairs already recorded in a note, read back off its own frontmatter.
+
+    Parsed with the same reader the indexer uses, because `_yaml_str` escaping
+    means only real YAML round-trips what was written. Callers gate this on
+    the same ownership proof `_owner_tail` and `_checked_items` use: a note we
+    cannot prove is ours is never opened for its content.
+    """
+    try:
+        raw = frontmatter.load(str(path)).metadata.get("asr_repairs")
+    except Exception:  # noqa: BLE001 - an unreadable note simply carries nothing
+        return []
+    out: list[AsrRepair] = []
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict):
+            continue
+        heard = str(item.get("heard") or "").strip()
+        corrected = str(item.get("corrected") or "").strip()
+        if heard and corrected:
+            out.append(AsrRepair(heard=heard, corrected=corrected))
+    return out
+
+
 def write_note(
     cfg: Config,
     transcript: Transcript,
@@ -795,8 +834,15 @@ def write_note(
 
     Regeneration is a SPLICE, not an overwrite: the generated region replaces
     what was there, and anything the owner wrote below it — plus the boxes
-    they ticked inside it — comes back. Only a note we can prove is ours is
-    ever read for that; a stranger's file is not opened for its content.
+    they ticked inside it, and the study notes an earlier run left on disk —
+    comes back. Only a note we can prove is ours is ever read for that; a
+    stranger's file is not opened for its content.
+
+    Carrying the study link here rather than at each caller is deliberate:
+    this is the only place that knows which path was FINALLY claimed, and the
+    study stem is derived from that path. `study_stem_name` therefore means
+    "what this run produced"; absent, the note keeps what the vault already
+    holds.
     """
     if path is None:
         path = note_path_for(cfg, transcript, insight)
@@ -817,6 +863,15 @@ def write_note(
     ours = owns_note(path, transcript.id)
     tail = _owner_tail(path) if ours else ""
     checked = _checked_items(path) if ours else frozenset()
+    if ours and not study_stem_name:
+        # This run produced no study notes — the recording is not a lecture,
+        # the profile is off, or the pass failed — but an earlier one may have
+        # left some, and they are still on disk and still served by the
+        # dashboard. Dropping the link would make the note disagree with the
+        # vault, so it is carried across exactly like a ticked checkbox is.
+        study_stem_name, has_study_pdf = _existing_study_link(cfg, path, transcript.id)
+        if study_stem_name and asr_repairs is None:
+            asr_repairs = _existing_asr_repairs(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     generated = render_note(
         transcript,

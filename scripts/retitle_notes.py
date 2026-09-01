@@ -43,6 +43,7 @@ from transcript_analyzer.titles import (  # noqa: E402
     format_long_date,
     headline_from_summary,
     parse_date,
+    retrieval_abstract,
 )
 
 HEADLINE_SCHEMA = {
@@ -59,6 +60,21 @@ HEADLINE_SCHEMA = {
 HEADLINE_SYSTEM = """You write short, specific titles for meeting transcripts.
 Return JSON only. No dates in the title. Prefer concrete topics and people
 over generic words like Meeting, Sync, or Call."""
+
+
+def _headline_source(post) -> str:
+    """The text a headline is derived from: the SHORT retrieval abstract.
+
+    The body's '## Summary' is the long structured summary now, and the
+    extraction prompt asks the model to open it with '###' subheadings — so
+    deriving a headline from it yields '### Opening The class opened with a
+    recap', which `_target_path` then slugifies into a real filename in a
+    vault that has no backup. `abstract:` is the field that is still one
+    bounded paragraph; a legacy note without one falls back to the body
+    summary through the same bound the indexer applies.
+    """
+    abstract = " ".join(str(post.get("abstract") or "").split())
+    return abstract or retrieval_abstract(_extract_summary(post.content))
 
 
 def _set_h1(body: str, title: str) -> str:
@@ -202,7 +218,7 @@ def retitle(
             skipped += 1
             continue
 
-        summary = _extract_summary(post.content)
+        summary = _headline_source(post)
         people = []
         for p in post.get("people") or []:
             people.append(re.sub(r"[\[\]]", "", str(p)).strip())

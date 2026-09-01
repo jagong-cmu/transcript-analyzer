@@ -234,3 +234,56 @@ def test_the_note_links_the_pdf_exactly_when_one_was_written(cfg, monkeypatch):
     assert Path(res["study_pdf"]).read_bytes() == b"%PDF-1.4 fake"
     assert f"[[{stem}.pdf|Printable PDF]]" in Path(res["note_path"]).read_text()
     assert f"[[{stem}.pdf|Printable PDF]]" in Path(res["study_notes"]).read_text()
+
+
+def test_a_truncated_study_notes_response_fails_the_transcript(no_pdf_cfg):
+    """A response cut off at lecture_max_tokens must be RETRIED, not absorbed.
+
+    Swallowing it wrote a downgraded note and then recorded the transcript's
+    hash as done, so the recording was skipped forever. Propagating instead
+    leaves record_sync unreached and the next cycle reprocesses it.
+    """
+    from transcript_analyzer.pipeline.llm import LLMResponseError
+
+    cfg = no_pdf_cfg
+
+    class TruncatingLLM(StubLLM):
+        def chat_json(self, system, user, schema, *, max_tokens=None, stage="", stream=False):
+            if stage == "lecture":
+                raise LLMResponseError(
+                    "Structured output truncated at max_tokens; raise the limit."
+                )
+            return super().chat_json(
+                system, user, schema, max_tokens=max_tokens, stage=stage, stream=stream
+            )
+
+    llm = TruncatingLLM(extraction("lecture", "21-241", "Linear Algebra"))
+    t = transcript("lec8", LECTURE_TEXT, "Lecture")
+
+    with pytest.raises(LLMResponseError):
+        run(cfg, llm, t)
+
+    # Nothing was recorded as synced, so the next cycle picks it up again.
+    from transcript_analyzer.db import get_sync_note_path
+
+    with get_conn(cfg.db_path) as conn:
+        assert get_sync_note_path(conn, t.source, t.native_id) is None
+
+
+def test_a_contained_study_failure_still_writes_the_note(no_pdf_cfg):
+    """Only unparseable responses propagate; the rest stay contained."""
+    cfg = no_pdf_cfg
+
+    class BrokenLLM(StubLLM):
+        def chat_json(self, system, user, schema, *, max_tokens=None, stage="", stream=False):
+            if stage == "lecture":
+                raise RuntimeError("diagram service exploded")
+            return super().chat_json(
+                system, user, schema, max_tokens=max_tokens, stage=stage, stream=stream
+            )
+
+    res = run(cfg, BrokenLLM(extraction("lecture", "21-241", "Linear Algebra")),
+              transcript("lec9", LECTURE_TEXT, "Lecture"))
+
+    assert res["study_notes"] is None
+    assert "A much longer summary of what happened, at length." in Path(res["note_path"]).read_text()
