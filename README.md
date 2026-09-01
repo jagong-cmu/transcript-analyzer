@@ -7,6 +7,10 @@ the people you talk to repeatedly, research-study rollups, and prep notes for to
 A local **dashboard** surfaces the synthesis as a CEO briefing (digest, commitments, people,
 prep) and lets you ask questions with citations.
 
+Every recording gets a **detailed summary** you can read straight through instead of a two-line
+abstract. Recordings the model classifies as **lectures** get more: study-grade notes with real,
+rendered diagrams and a printable PDF, written into the vault beside the transcript note.
+
 > **Privacy note:** transcript *storage* is local (your Obsidian vault + a local SQLite index),
 > but analysis is not — transcripts are sent to the Anthropic API for insight extraction,
 > synthesis, and chat. If a conversation includes other people (interviewees, colleagues), their
@@ -19,6 +23,10 @@ Granola API ──┐                              ┌─> Obsidian notes   (sou
               ├─> sync ──> Claude API ────────┤
 Pocket API  ──┘   (junk filter -> insights)   └─> SQLite index    (derived by parsing notes)
                                                         │
+      lecture? ──> study-notes pass (Opus 5) ──────────┤
+                       • Study Notes/<stem>.md          │
+                       • Study Notes/<stem>.pdf         │
+                                                        │
                      daily synthesis (Claude API) ──────┤
                        • Digests/YYYY-MM-DD.md          │
                        • Digests/Commitments.md         │
@@ -28,7 +36,7 @@ Pocket API  ──┘   (junk filter -> insights)   └─> SQLite index    (der
                                                         │
                                   FastAPI dashboard (localhost:8787)
                                     • today’s digest  • commitments  • people
-                                    • prep  • run synthesis  • chat  • browse
+                                    • prep  • lectures  • chat  • browse
 ```
 
 - **Pocket AI** and **Granola** are pulled via their official public APIs (incremental, with
@@ -54,6 +62,44 @@ Pocket API  ──┘   (junk filter -> insights)   └─> SQLite index    (der
 - **Pocket audio** is downloaded into `Transcript Insights/Attachments/` and embedded in each
   note. Transcript lines include `[M:SS]` timestamps you can click in the dashboard to seek
   the recording. Granola's API exposes no audio (timestamps still appear for reference).
+- Every note carries **two summaries**. The note body shows the long one, sized to the
+  recording (~150 words for a short call, 600–900 for an hour meeting, full study-note
+  treatment for a lecture). A one-paragraph `abstract:` stays in frontmatter as the retrieval
+  field: digests, dossiers, rollups and chat all read it, and chat sends every abstract on
+  every question, so that is the field that has to stay small.
+- Each note is regenerated inside **managed markers**
+  (`<!-- transcript-analyzer:begin -->` … `:end`). Anything you write below the end marker
+  survives, and a checkbox you ticked stays ticked.
+
+### Lectures
+
+The extraction pass classifies each recording (`lecture` / `meeting` / `interview` /
+`personal`) in the same call that writes the summary, so detection costs nothing extra. There
+is no course registry: the model names the course, and the code is normalized against the
+courses already in the vault, so week 2 of `21-241` rejoins week 1 even when spelled `21241`.
+
+A lecture then buys a second pass (Opus 5 by default) that writes into
+`Transcript Insights/Study Notes/`:
+
+- **Grounded, and separated from what is not.** Every section carries a verbatim span from the
+  transcript and is dropped if that span does not string-match; so is every "assigned or
+  examinable" claim. Gap-filling background is allowed but never blended in — it renders in
+  its own clearly marked *Background (not from lecture)* block.
+- **Real diagrams, never generated images.** The model emits diagram *specs* — Mermaid for
+  flows and timelines, KaTeX for math, fenced code for SML — which are rendered
+  deterministically in the Playwright Chromium. A diagram that fails to render is **dropped**,
+  from the PDF and the markdown alike. Nothing is faked to stand in for it.
+- **ASR repairs are auditable.** Lecture audio is a single mic with no speaker labels; a real
+  15150 transcript says "this new age of AR" where the professor said AI. Repairs are allowed,
+  and each one is listed in the note's frontmatter with the span it replaced — a repair whose
+  span is not in the transcript is dropped.
+- The PDF is linked from the transcript note, from the study note, and from the dashboard's
+  **Lectures** page. Regeneration is idempotent, and both files follow the note if it is
+  renamed.
+
+PDF rendering needs the Playwright Chromium (`pip install -e '.[pdf]' && playwright install
+chromium`). Without it the markdown study notes are still written; set `[lecture] pdf = false`
+to skip it deliberately.
 
 ## Cost guard
 
@@ -64,7 +110,13 @@ This runs unattended against a paid API, so the guards are hard, not advisory:
 - **Kill switch:** `touch data/llm.kill` stops all API calls immediately; delete to resume.
 - `GET /health` on the dashboard shows this month's spend.
 
-Expected cost at ~50 conversations/month with Opus 4.8: roughly $4–6/month.
+Expected cost at ~50 conversations/month with Opus 4.8: roughly $4–6/month. A lecture adds one
+Opus 5 study-notes call on top of its extraction.
+
+Models and reasoning effort are set **per stage**, not globally
+(`[anthropic.stage_models]` / `[anthropic.stage_effort]`): extraction runs at `low` effort
+because it only fills in a schema, and the study-notes pass gets the expensive model. Thinking
+is on by default on Opus 5 and billed as output, so an unpinned stage is a silent cost.
 
 ## Setup
 
@@ -133,6 +185,13 @@ carries `[M:SS]` lines. `--force` overrides either.
 ./.venv/bin/python scripts/retitle_notes.py --limit 5 --dry-run
 ./.venv/bin/python scripts/retitle_notes.py
 
+# Re-summarize existing notes into the detailed-summary shape (and give
+# existing lectures study notes + PDFs). DRY RUN BY DEFAULT; --apply writes,
+# after copying every note it touches to data/backfill-backups/<timestamp>/.
+python scripts/backfill_summaries.py                     # see what it would do
+python scripts/backfill_summaries.py --apply --limit 5   # try five first
+python scripts/backfill_summaries.py --apply --batch --max-calls 200
+
 # Re-fetch timed segments from Pocket/Granola and rewrite the ## Transcript
 # section in place. No insight LLM calls.
 ./.venv/bin/python scripts/backfill_timestamps.py --source pocket --dry-run
@@ -157,6 +216,14 @@ bash scripts/install_launchd.sh uninstall
 - `src/transcript_analyzer/connectors/` — `pocket_api.py`, `pocket.py` (vault fallback), `granola.py`
 - `src/transcript_analyzer/pipeline/` — `llm.py` (Claude API + cost guard), `quality.py` (junk
   filter), `insights.py`, `synthesize.py` (digest/dossiers/studies/prep), `organize.py`, `indexer.py`
+- `src/transcript_analyzer/pipeline/lecture.py` — the lecture profile: study-notes prompt pack,
+  the citation/ASR/diagram gates, and the write order that keeps the PDF and the markdown in step
+- `src/transcript_analyzer/pipeline/batch.py` — Message Batches API (half price) for the backfill
+- `src/transcript_analyzer/pipeline/citations.py` — the one verbatim-quote match, shared by the
+  synthesis citation gate and the lecture gates
+- `src/transcript_analyzer/courses.py` — course identity for lectures, with no registry in config
+- `src/transcript_analyzer/render/` — `study.py` (markdown + HTML, pure), `pdf.py` (Playwright,
+  and the gate that drops diagrams that will not draw), `assets.py` (local mermaid/KaTeX mirror)
 - `src/transcript_analyzer/obsidian/writer.py` — transcript notes + managed-region synthesis writes
 - `src/transcript_analyzer/titles.py` — note titles (headline + long date), shared by the writer,
   indexer and insight extraction
@@ -178,6 +245,13 @@ bash scripts/install_launchd.sh uninstall
   between its own markers.
 - Insight-extraction failures are counted (`insight_failures_total` in the meta table) and
   surfaced in sync logs — an LLM failure never silently writes an empty note.
+- Nothing is written, renamed or deleted at a vault path that is not provably that
+  transcript's own. A study note carries `transcript_id`; the PDF beside it is claimed through
+  that note, exactly as an mp3 in `Attachments/` is claimed through the note at its stem.
+- The study-notes pass is an upgrade, never a precondition: if it fails, the note is still
+  written with its detailed summary.
+- `scripts/backfill_summaries.py` is on demand only, dry-run by default, backs up every note it
+  rewrites outside the vault, and skips any note whose `transcript_id` does not match.
 
 ## Tests
 
