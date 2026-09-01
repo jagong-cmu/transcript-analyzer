@@ -26,18 +26,18 @@ from ..db import get_conn, upsert_transcript
 from ..models import DEFAULT_KIND, Attendee, NoteRecord, coerce_kind
 from ..obsidian.writer import (
     STUDY_SUBDIR,
-    heading_level,
     is_section_end,
     is_section_start,
-    opens_section,
     parse_action_items,
     transcript_bounds,
 )
 from ..titles import clean_headline, compose_display_title, headline_from_summary
 
-# Re-exported: `heading_level`, `opens_section`, `is_section_start` and
-# `is_section_end` are the writer's definitions, imported here so the reader
-# and the writer cannot disagree about what a heading is (AGENTS.md).
+# `is_section_start` / `is_section_end` / `transcript_bounds` /
+# `parse_action_items` are the WRITER's definitions, imported here so the
+# reader and the writer cannot disagree about what a heading is, where the
+# transcript callout ends, or which boxes are ticked (AGENTS.md). Re-exported
+# because the one-shot migration scripts read notes through them too.
 __all__ = [
     "EXCLUDED_SUBDIRS",
     "extract_transcript",

@@ -161,8 +161,6 @@ def collect(llm: LLM, batch_id: str, *, stage: str = "") -> BatchOutcome:
 
 
 def _collect(llm: LLM, batch_id: str, model: str) -> BatchOutcome:
-    import json
-
     import anthropic
 
     results: dict[str, dict] = {}

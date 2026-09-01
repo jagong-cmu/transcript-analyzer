@@ -136,7 +136,8 @@ def test_markdown_subset_renders_the_shapes_the_model_emits():
     out = study.markdown_to_html(
         "## Heading\n\nA **bold** and *italic* and `code`.\n\n- one\n- two\n\n1. first\n2. second"
     )
-    assert "<h4>Heading</h4>" in out  # nested under the section's own h2
+    # This text sits under a section's own h2, so nothing may outrank h3.
+    assert "<h3>Heading</h3>" in out
     assert "<strong>bold</strong>" in out and "<em>italic</em>" in out
     assert "<code>code</code>" in out
     assert out.count("<li>") == 4 and "<ul>" in out and "<ol>" in out
@@ -146,6 +147,12 @@ def test_emphasis_markers_inside_code_stay_literal():
     out = study.markdown_to_html("Use `a ** b` for exponent.")
     assert "<code>a ** b</code>" in out
     assert "<strong>" not in out
+
+
+def test_a_heading_never_outranks_the_section_it_sits_in():
+    assert "<h3>Top</h3>" in study.markdown_to_html("# Top")
+    assert "<h3>Sub</h3>" in study.markdown_to_html("### Sub")
+    assert "<h5>Deep</h5>" in study.markdown_to_html("##### Deep")
 
 
 def test_unclosed_emphasis_does_not_leave_an_open_tag():

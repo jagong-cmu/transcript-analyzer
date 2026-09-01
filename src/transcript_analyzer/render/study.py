@@ -305,9 +305,10 @@ def markdown_to_html(text: str) -> str:
             level += 1
         if 0 < level <= 6 and stripped[level: level + 1] == " ":
             close_list()
-            # Section headings inside a body are nested under the section's
-            # own h2, so they start at h3 and never outrank it.
-            tag = f"h{min(6, level + 2)}"
+            # This text always sits under a section's own h2, so a heading may
+            # never outrank h3: a '#' or '##' the model wrote is demoted to
+            # h3, and anything already deeper keeps the level it asked for.
+            tag = f"h{max(3, min(6, level))}"
             out.append(f"<{tag}>{_inline(stripped[level + 1:])}</{tag}>")
             continue
         if stripped.startswith(("- ", "* ")):
