@@ -218,3 +218,24 @@ def test_retitle_carries_the_recording_and_its_embed_to_the_new_name(cfg, monkey
     assert new_audio.read_bytes() == b"our-recording"
     assert not old_audio.exists(), "the recording was orphaned under the old stem"
     assert f"![[{new_audio.name}]]" in moved.read_text(encoding="utf-8")
+
+
+def test_a_stem_being_downloaded_to_is_already_claimed(cfg):
+    """An in-flight download is a claim.
+
+    The recording streams into '<stem>.mp3.part' and only becomes '<stem>.mp3'
+    at the very end, so for the whole download the stem looked completely free
+    to every other claimer — which is how two transcripts ended up fighting
+    over one stem, one of them destroying the other's recording.
+    """
+    partial = writer.audio_partial(
+        writer.audio_for_stem(cfg.vault.insights_path, "2026-07-01 pricing-deck-review")
+    )
+    partial.parent.mkdir(parents=True, exist_ok=True)
+    partial.write_bytes(b"half a recording")
+
+    path = writer.write_note(cfg, _transcript("t2fedcba"), _insight())
+
+    assert path.name == "2026-07-01 pricing-deck-review (t2fedc).md"
+    assert not (cfg.vault.insights_path / BASE_NAME).exists()
+    assert partial.read_bytes() == b"half a recording"

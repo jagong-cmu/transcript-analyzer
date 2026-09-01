@@ -431,3 +431,92 @@ def test_resync_leaves_an_unreadable_previous_note_alone(cfg, monkeypatch, caplo
     assert old_note.exists() and old_note.read_bytes() == before
     assert Path(result["note_path"]) != old_note
     assert str(old_note) in caplog.text
+
+
+class _FakeStream:
+    """Enough of httpx.stream's context manager to drive download_audio."""
+
+    def __init__(self, chunks, on_open=None):
+        self._chunks = chunks
+        self._on_open = on_open
+
+    def __enter__(self):
+        if self._on_open is not None:
+            self._on_open()
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def raise_for_status(self):
+        return None
+
+    def iter_bytes(self, chunk_size=None):
+        yield from self._chunks
+
+
+def _stub_audio_download(monkeypatch, chunks, on_open=None):
+    from transcript_analyzer.connectors import pocket_api
+
+    monkeypatch.setattr(
+        pocket_api.PocketClient, "audio_url", lambda self, rec_id: "https://x.invalid/a.mp3"
+    )
+    monkeypatch.setattr(
+        pocket_api.httpx,
+        "stream",
+        lambda *args, **kwargs: _FakeStream(chunks, on_open=on_open),
+    )
+    return pocket_api
+
+
+def test_a_finished_download_never_replaces_a_stem_taken_while_it_streamed(
+    cfg, monkeypatch, caplog
+):
+    """The destination is proven free at the START of a multi-minute stream.
+
+    A retitle pass on the live vault legitimately takes that stem meanwhile and
+    moves ITS recording there; the unconditional replace at the end then
+    destroyed a recording that was never ours, unrecoverably.
+    """
+    cfg = _pocket_cfg(cfg)
+    transcript = _transcript()
+    note = cfg.vault.insights_path / "2026-07-01 pricing-deck-review.md"
+    dest = writer.audio_path_for(cfg, note)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    def someone_takes_the_stem():
+        note.write_text(FOREIGN_NOTE, encoding="utf-8")
+        dest.write_bytes(b"stranger-recording")
+
+    pocket_api = _stub_audio_download(
+        monkeypatch, [b"our-audio"], on_open=someone_takes_the_stem
+    )
+
+    with caplog.at_level(
+        logging.WARNING, logger="transcript_analyzer.connectors.pocket_api"
+    ):
+        with pocket_api.PocketClient(cfg) as pc:
+            got = pc.download_audio("rec1", dest, transcript.id)
+
+    assert got is None
+    assert dest.read_bytes() == b"stranger-recording", "a stranger's recording was replaced"
+    assert not writer.audio_partial(dest).exists(), "the discarded download was left behind"
+    assert str(dest) in caplog.text
+
+
+def test_a_download_onto_a_free_stem_still_lands(cfg, monkeypatch):
+    """Re-proving the destination must not disable the ordinary download."""
+    cfg = _pocket_cfg(cfg)
+    transcript = _transcript()
+    note = cfg.vault.insights_path / "2026-07-01 pricing-deck-review.md"
+    dest = writer.audio_path_for(cfg, note)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    pocket_api = _stub_audio_download(monkeypatch, [b"our-", b"audio"])
+
+    with pocket_api.PocketClient(cfg) as pc:
+        got = pc.download_audio("rec1", dest, transcript.id)
+
+    assert got == dest
+    assert dest.read_bytes() == b"our-audio"
+    assert not writer.audio_partial(dest).exists()

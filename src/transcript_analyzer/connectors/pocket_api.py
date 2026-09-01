@@ -11,6 +11,7 @@ Preferred over the vault-folder connector when an API key is configured.
 """
 from __future__ import annotations
 
+import logging
 import re
 from datetime import date, datetime
 from pathlib import Path
@@ -20,6 +21,9 @@ import httpx
 
 from ..config import Config
 from ..models import Transcript, stable_id
+from ..obsidian import writer
+
+_log = logging.getLogger(__name__)
 
 
 class PocketAuthError(RuntimeError):
@@ -96,21 +100,42 @@ class PocketClient:
         d = data.get("data", data) if isinstance(data, dict) else {}
         return d.get("signed_url") if isinstance(d, dict) else None
 
-    def download_audio(self, rec_id: str, dest: "Path") -> Optional["Path"]:
-        """Download the recording's audio to `dest`. Returns the path, or None."""
+    def download_audio(
+        self, rec_id: str, dest: "Path", transcript_id: str
+    ) -> Optional["Path"]:
+        """Download the recording's audio to `dest`. Returns the path, or None.
+
+        The stem is claimed for the whole stream — `writer.audio_partial` is
+        what `claimable_stem` reads — and re-proven immediately before the
+        replace. A check made at the start cannot carry a multi-minute
+        download: a retitle pass or another sync can legitimately take that
+        stem meanwhile, and replacing then destroys THEIR recording in a vault
+        with no backup. Unproven means the finished file is discarded and the
+        next sync downloads under a stem this transcript does own.
+        """
         if dest.exists() and dest.stat().st_size > 0:
             return dest  # already downloaded
         url = self.audio_url(rec_id)
         if not url:
             return None
         dest.parent.mkdir(parents=True, exist_ok=True)
-        tmp = dest.with_suffix(dest.suffix + ".part")
+        tmp = writer.audio_partial(dest)
         try:
             with httpx.stream("GET", url, timeout=300, follow_redirects=True) as r:
                 r.raise_for_status()
                 with open(tmp, "wb") as f:
                     for chunk in r.iter_bytes(chunk_size=1 << 16):
                         f.write(chunk)
+            if not writer.claimable_stem(
+                writer.note_for_audio(dest), transcript_id, in_flight_download=True
+            ):
+                _log.warning(
+                    "discarding the recording downloaded for %s: %s was taken "
+                    "while it streamed and is not this transcript's to replace",
+                    rec_id, dest,
+                )
+                tmp.unlink(missing_ok=True)
+                return None
             tmp.replace(dest)
             return dest
         except Exception:  # noqa: BLE001

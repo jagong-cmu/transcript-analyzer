@@ -85,6 +85,36 @@ def _replace_transcript_section(content: str, timed_text: str) -> str:
     return "\n".join(rebuilt).rstrip("\n") + "\n"
 
 
+def _sync_row_for(conn, note_path: Path):
+    """The ONE sync_state row that provably belongs to this note.
+
+    Returns (row, ambiguous_count). `sync_state` is keyed on
+    (source, native_id), so note_path is NOT unique — a deleted-and-retaken
+    filename, or the retitle script's path rewrite, legitimately leaves several
+    rows holding it. Taking one of them resolves a native_id belonging to a
+    DIFFERENT recording, and this script then writes that recording's
+    transcript into this note. Exactly one row, or we do not know which
+    recording this is: both lookups fail safe through this one definition.
+
+    The filename fallback (for a note moved since it was synced) compares
+    EXACTLY: matched as a LIKE pattern, '_' and '%' were wildcards, so a
+    hand-renamed note picked up another recording's native_id.
+    """
+    rows = conn.execute(
+        "SELECT native_id, source, note_path FROM sync_state WHERE note_path = ?",
+        (canonical_note_path(note_path),),
+    ).fetchall()
+    if not rows:
+        rows = [
+            r
+            for r in conn.execute(
+                "SELECT native_id, source, note_path FROM sync_state"
+            ).fetchall()
+            if r["note_path"] and Path(r["note_path"]).name == note_path.name
+        ]
+    return (rows[0], 0) if len(rows) == 1 else (None, len(rows))
+
+
 def _already_timed(text: str) -> bool:
     return bool(re.search(r"^\[\d{1,2}:\d{2}", text or "", re.MULTILINE))
 
@@ -118,29 +148,8 @@ def backfill(*, source: str | None, limit: int | None, dry_run: bool, force: boo
             errors += 1
             continue
         native = None
-        ambiguous = 0
-        # Prefer sync_state native_id
         with get_conn(cfg.db_path) as conn:
-            srow = conn.execute(
-                "SELECT native_id, source FROM sync_state WHERE note_path = ?",
-                (canonical_note_path(note_path),),
-            ).fetchone()
-            if not srow:
-                # Fall back to the filename, compared EXACTLY. Matching it as a
-                # LIKE pattern made '_' and '%' wildcards, so a hand-renamed
-                # note could pick up a different recording's native_id and have
-                # someone else's transcript written into it.
-                matches = [
-                    r
-                    for r in conn.execute(
-                        "SELECT native_id, source, note_path FROM sync_state"
-                    ).fetchall()
-                    if r["note_path"] and Path(r["note_path"]).name == note_path.name
-                ]
-                if len(matches) == 1:
-                    srow = matches[0]
-                else:
-                    ambiguous = len(matches)
+            srow, ambiguous = _sync_row_for(conn, note_path)
             if srow:
                 native = srow["native_id"]
                 src = srow["source"] or src
@@ -149,8 +158,8 @@ def backfill(*, source: str | None, limit: int | None, dry_run: bool, force: boo
             # Never guess which recording a note belongs to: a re-run is cheap,
             # the wrong transcript in the vault is not recoverable.
             print(
-                f"  · skip {note_path.name}: {ambiguous} sync_state rows share "
-                f"this filename"
+                f"  · skip {note_path.name}: {ambiguous} sync_state rows point "
+                f"at this note"
             )
             skipped += 1
             continue

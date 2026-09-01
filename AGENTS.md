@@ -46,14 +46,17 @@ against a scratch vault instead of the real one.
   back); unknown for ANY reason — no id line, unreadable, permission denied — means NOT
   ours. `writer.claim_note_path` is the one definition of "where may this note go", and it
   claims the whole stem: the note AND the `Attachments/<stem>.mp3` that only a note can
-  claim. All six destructive paths go through them — write (`note_path_for`), rename
-  (`scripts/retitle_notes.py:_target_path`), delete (`sync._is_stale_note`, via
-  `sync._owned_prev_note`), and the audio move at BOTH ends, source and destination
-  (`writer.move_audio_with_note`; the move runs before the rename in `_rename_with_audio`,
-  because after it the source stem no longer holds the note that proves the recording is
-  ours). A path that cannot be proven ours is left alone and
+  claim: the note, the `Attachments/<stem>.mp3` that only a note can claim, and any
+  `writer.audio_partial` still streaming towards it. All seven destructive paths go through
+  them — write (`note_path_for`), rename (`scripts/retitle_notes.py:_target_path`), delete
+  (`sync._is_stale_note`, via `sync._owned_prev_note`), the audio move at BOTH ends, source
+  and destination (`writer.move_audio_with_note`; the move runs before the rename in
+  `_rename_with_audio`, because after it the source stem no longer holds the note that
+  proves the recording is ours), and the download's final replace
+  (`connectors/pocket_api.download_audio`, re-proven after the stream because a check made
+  minutes earlier is not a claim). A path that cannot be proven ours is left alone and
   logged: the vault has no backup, so an orphan to clean up by hand beats a deletion that
-  cannot be undone. Extend a destructive path by adding a call site here, never a sixth
+  cannot be undone. Extend a destructive path by adding a call site here, never an eighth
   ownership rule.
 - Scripts under `scripts/` write to the *live* vault and call the Pocket/Granola/Anthropic
   APIs. Use `--dry-run`/`--limit` when exercising them.

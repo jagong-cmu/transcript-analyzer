@@ -81,6 +81,21 @@ def audio_path_for(cfg: Config, note_path: Path) -> Path:
     return audio_for_stem(cfg.vault.insights_path, note_path.stem)
 
 
+def note_for_audio(audio_path: Path) -> Path:
+    """The note whose stem claims this recording — the inverse of `audio_for_stem`."""
+    return audio_path.parent.parent / f"{audio_path.stem}.md"
+
+
+def audio_partial(audio_path: Path) -> Path:
+    """Where an in-flight download of that recording streams to.
+
+    One definition, two readers: the downloader writes here, and
+    `claimable_stem` looks for it, so a stem being streamed to counts as taken
+    for the whole download instead of looking free until the last moment.
+    """
+    return audio_path.with_suffix(audio_path.suffix + ".part")
+
+
 def move_audio_with_note(
     cfg: Config, old_note: Path, new_note: Path, transcript_id: str
 ) -> Path | None:
@@ -248,21 +263,30 @@ def owns_note(path: Path, transcript_id: str) -> bool:
     return _existing_transcript_id(path) == transcript_id
 
 
-def claimable_stem(note_path: Path, transcript_id: str) -> bool:
+def claimable_stem(
+    note_path: Path, transcript_id: str, *, in_flight_download: bool = False
+) -> bool:
     """Whether EVERY vault file keyed on this stem is free or provably ours.
 
-    A stem names two files — the note and its recording in Attachments/ — and
-    the note is the only one that can carry proof, so the pair is claimable
-    only when the note there is ours, or when neither file exists at all. That
-    is what keeps a still-embedded mp3 whose note the owner renamed away from
-    being unlinked by, or played back inside, somebody else's note.
+    A stem names the note, its recording in Attachments/, and any download
+    still streaming towards that recording — and the note is the only one that
+    can carry proof, so the set is claimable only when the note there is ours,
+    or when none of them exist. That is what keeps a still-embedded mp3 whose
+    note the owner renamed away from being unlinked by, or played back inside,
+    somebody else's note.
+
+    `in_flight_download` is for the downloader itself, which is holding the
+    partial it is about to become and must not read its own file as someone
+    else's claim. Every other caller leaves it False.
     """
     if owns_note(note_path, transcript_id):
         return True
-    return (
-        not note_path.exists()
-        and not audio_for_stem(note_path.parent, note_path.stem).exists()
-    )
+    if note_path.exists():
+        return False
+    audio = audio_for_stem(note_path.parent, note_path.stem)
+    if audio.exists():
+        return False
+    return in_flight_download or not audio_partial(audio).exists()
 
 
 def claim_note_path(base: Path, transcript_id: str) -> Path:
@@ -383,20 +407,22 @@ def write_note(
     longer sits on. One claim, threaded through both.
 
     If something else did take that path while the recording streamed, the
-    claim is redone and the recording follows only if it is still ours to move
-    — a stem another note now owns keeps its mp3, and this note is written
-    without an embed rather than with one naming a file it does not own. Either
-    way the name in the body and the file on disk cannot disagree, and nothing
-    unowned is written over.
+    claim is redone and the recording NEVER follows: the stem belongs to
+    whoever took it, so its mp3 is theirs and this note is written with no
+    embed at all rather than one naming a file it does not own. Either way the
+    name in the body and the file on disk cannot disagree, and nothing unowned
+    is written over.
     """
     if path is None:
         path = note_path_for(cfg, transcript, insight)
     elif path.exists() and not owns_note(path, transcript.id):
-        _log.warning("%s was taken while the recording downloaded; re-claiming", path)
-        final = note_path_for(cfg, transcript, insight)
-        moved = move_audio_with_note(cfg, path, final, transcript.id)
-        audio_name = moved.name if moved is not None else None
-        path = final
+        _log.warning(
+            "%s was taken while the recording downloaded; re-claiming, and "
+            "leaving anything at that stem to the note that owns it",
+            path,
+        )
+        audio_name = None
+        path = note_path_for(cfg, transcript, insight)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(render_note(transcript, insight, audio_name=audio_name), encoding="utf-8")
     return path

@@ -419,3 +419,27 @@ def test_a_moved_note_is_still_found_by_its_filename(cfg, monkeypatch):
 
     assert _FakePocketClient.fetched == ["MINE"]
     assert summary["updated"] == 1
+
+
+def test_two_sync_state_rows_for_one_note_skip_rather_than_guessing(cfg, monkeypatch):
+    """sync_state is keyed on (source, native_id), so note_path is not unique.
+
+    The exact-path lookup resolved native_id with fetchone(), so whichever row
+    SQLite handed back decided which recording was fetched — and the loser's
+    transcript was written into this note over the top of the right one.
+    """
+    from transcript_analyzer.db import canonical_note_path
+
+    cfg, note = _backfill_env(cfg, monkeypatch, "2026-07-01 chat.md")
+    _sync_row(cfg, canonical_note_path(note), "MINE")
+    _sync_row(cfg, canonical_note_path(note), "SOMEONE-ELSE")
+    before = note.read_text(encoding="utf-8")
+
+    summary = backfill_timestamps.backfill(
+        source=None, limit=None, dry_run=False, force=False
+    )
+
+    assert _FakePocketClient.fetched == [], "guessed which recording this note is"
+    assert summary["updated"] == 0
+    assert summary["skipped"] == 1
+    assert note.read_text(encoding="utf-8") == before

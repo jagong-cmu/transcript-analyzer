@@ -88,7 +88,7 @@ def _maybe_download_audio(cfg: Config, transcript: Transcript, note_path: Path) 
     dest = writer.audio_path_for(cfg, note_path)
     try:
         with PocketClient(cfg) as pc:
-            got = pc.download_audio(transcript.native_id, dest)
+            got = pc.download_audio(transcript.native_id, dest, transcript.id)
     except Exception:  # noqa: BLE001 - audio is best-effort, never fail the note
         return None
     return dest.name if got else None
