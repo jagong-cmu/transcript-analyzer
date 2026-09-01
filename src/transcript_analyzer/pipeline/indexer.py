@@ -31,7 +31,12 @@ from ..obsidian.writer import (
     parse_action_items,
     transcript_bounds,
 )
-from ..titles import clean_headline, compose_display_title, headline_from_summary
+from ..titles import (
+    clean_headline,
+    compose_display_title,
+    headline_from_summary,
+    retrieval_abstract,
+)
 
 # `is_section_start` / `is_section_end` / `transcript_bounds` /
 # `parse_action_items` are the WRITER's definitions, imported here so the
@@ -178,7 +183,7 @@ def _parse_note(path: Path) -> Optional[NoteRecord]:
     # has no `abstract:` — its body summary was already short, so it becomes
     # both, and the corpus every Ask question carries does not silently grow.
     detailed = _extract_summary(post.content)
-    abstract = " ".join(str(meta.get("abstract") or "").split()) or _abstract_from(detailed)
+    abstract = retrieval_abstract(str(meta.get("abstract") or "") or detailed)
     headline = clean_headline(str(meta.get("headline") or ""))
     if not headline:
         # Legacy notes: prefer H1 with date stripped, else first summary sentence.
@@ -206,21 +211,6 @@ def _parse_note(path: Path) -> Optional[NoteRecord]:
         note_path=str(path.resolve()),
         transcript_text=extract_transcript(post.content),
     )
-
-
-# An abstract standing in for a legacy note is bounded for the same reason the
-# real one is: this is the field Ask sends for every conversation, on every
-# question. A long body summary contributes its opening paragraph, not itself.
-_ABSTRACT_FALLBACK_CHARS = 900
-
-
-def _abstract_from(detailed: str) -> str:
-    """The retrieval abstract for a note that has no `abstract:` in frontmatter."""
-    for block in str(detailed or "").split("\n\n"):
-        para = " ".join(block.split())
-        if para and not para.startswith("#"):
-            return para[:_ABSTRACT_FALLBACK_CHARS].rstrip()
-    return " ".join(str(detailed or "").split())[:_ABSTRACT_FALLBACK_CHARS].rstrip()
 
 
 def _display_title(headline: str, date_str: str) -> str:

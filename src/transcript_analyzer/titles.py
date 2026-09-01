@@ -29,6 +29,31 @@ _TRAILING_LONG_DATE = re.compile(
 )
 
 
+# The retrieval abstract's hard ceiling, in characters. Ask sends EVERY
+# conversation's abstract on EVERY question, so this bound is the whole reason
+# the long summary and the short one are separate fields: unbounded, one
+# rambling answer inflates the corpus for every later question. One constant,
+# one function, applied to the model's own field and to every fallback alike —
+# a bound enforced on some paths only is not a bound.
+ABSTRACT_CHARS = 900
+
+
+def retrieval_abstract(text: str, limit: int = ABSTRACT_CHARS) -> str:
+    """The bounded one-paragraph abstract carried by `NoteRecord.summary`.
+
+    The opening non-heading paragraph of `text`, whitespace-collapsed and
+    truncated. Shared by `insights.insight_from_payload` (which must not trust
+    a model that ignores "ONE paragraph, 2-4 sentences") and by
+    `indexer.parse_note` (which stands one in for a note written before the
+    two-summary split). Add call sites here, never a second definition.
+    """
+    for block in str(text or "").split("\n\n"):
+        para = " ".join(block.split())
+        if para and not para.startswith("#"):
+            return para[:limit].rstrip()
+    return " ".join(str(text or "").split())[:limit].rstrip()
+
+
 def ordinal_day(day: int) -> str:
     if 11 <= day <= 13:
         suffix = "th"

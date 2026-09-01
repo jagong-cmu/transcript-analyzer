@@ -26,7 +26,7 @@ from typing import Optional
 from ..config import Config
 from ..courses import Course, bind
 from ..models import Insight, Transcript, coerce_kind
-from ..titles import clean_headline, headline_from_summary
+from ..titles import clean_headline, headline_from_summary, retrieval_abstract
 from .llm import LLM
 
 # Cost sanity cap, not a context-window limit (the 1M window fits any
@@ -253,7 +253,9 @@ def insight_from_payload(
         # A model that answered only one of the two still gets a usable note:
         # the abstract falls back to the detailed summary's opening, and the
         # detailed summary falls back to the abstract rather than being blank.
-        summary=abstract or _first_paragraph(detailed),
+        # Both go through the SAME bound — the model's own field is not
+        # trusted to have obeyed "ONE paragraph, 2-4 sentences".
+        summary=retrieval_abstract(abstract or detailed),
         detailed_summary=detailed or abstract,
         key_points=_as_list(data.get("key_points")),
         action_items=_as_list(data.get("action_items")),
@@ -265,20 +267,6 @@ def insight_from_payload(
         course_code=code,
         course_name=name,
     )
-
-
-def _first_paragraph(text: str, limit: int = 900) -> str:
-    """The opening paragraph of a long summary, for use as a fallback abstract.
-
-    Bounded, because this feeds the corpus every Ask question carries: an
-    unbounded fallback would quietly undo the whole reason the two summaries
-    are separate fields.
-    """
-    for block in str(text or "").split("\n\n"):
-        para = " ".join(block.split())
-        if para and not para.startswith("#"):
-            return para[:limit].rstrip()
-    return " ".join(str(text or "").split())[:limit].rstrip()
 
 
 def _as_str(v) -> str:

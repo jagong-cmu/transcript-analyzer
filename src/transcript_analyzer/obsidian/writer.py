@@ -218,11 +218,6 @@ def study_pdf_for(study_md: Path) -> Path:
     return study_md.with_suffix(".pdf")
 
 
-def study_pdf_path_for(cfg: Config, note_path: Path) -> Path:
-    """Where a transcript note's rendered study-notes PDF lives (if any)."""
-    return study_pdf_for(study_note_path_for(cfg, note_path))
-
-
 def audio_partial(audio_path: Path) -> Path:
     """Where an in-flight download of that recording streams to.
 

@@ -44,6 +44,12 @@ from .llm import LLM, LLMError
 
 LAST_RUN_KEY = "synthesis_last_run"
 
+# Every corpus-wide generation in this module names this stage, so
+# `[anthropic.stage_models] synthesis` / `stage_effort` actually reach the
+# call. With no override configured the stage resolves to the default
+# `[anthropic] model` and sends no effort, exactly as before.
+SYNTH_STAGE = "synthesis"
+
 CLAIM_SCHEMA = {
     "type": "object",
     "properties": {
@@ -291,7 +297,7 @@ def digest(cfg: Config, llm: LLM, records: list[NoteRecord], today: date) -> dic
         f"{cfg.synthesis.digest_days} days:\n\n{corpus}\n\n"
         "Write the digest."
     )
-    data = llm.chat_json(DIGEST_SYSTEM, user, schema=DIGEST_SCHEMA)
+    data = llm.chat_json(DIGEST_SYSTEM, user, schema=DIGEST_SCHEMA, stage=SYNTH_STAGE)
 
     dropped_total = 0
     lines = [f"**{data.get('headline', '').strip()}**", ""]
@@ -361,7 +367,7 @@ def dossiers(cfg: Config, llm: LLM, records: list[NoteRecord], *, force: bool = 
             + (f" (also appears as: {aliases})" if len(p.names) > 1 else "")
             + f"\n\nAll {len(recs)} conversations with them:\n\n{corpus}"
         )
-        data = llm.chat_json(DOSSIER_SYSTEM, user, schema=DOSSIER_SCHEMA)
+        data = llm.chat_json(DOSSIER_SYSTEM, user, schema=DOSSIER_SCHEMA, stage=SYNTH_STAGE)
 
         cares, d1 = verify_claims(data.get("cares_about", []), by_id)
         threads, d2 = verify_claims(data.get("open_threads", []), by_id)
@@ -457,7 +463,7 @@ def studies(cfg: Config, llm: LLM, records: list[NoteRecord], *, force: bool = F
             f"Study: {study.name}\nDescription: {study.description}\n\n"
             f"All {len(members)} sessions:\n\n{corpus}"
         )
-        data = llm.chat_json(ROLLUP_SYSTEM, user, schema=ROLLUP_SCHEMA)
+        data = llm.chat_json(ROLLUP_SYSTEM, user, schema=ROLLUP_SCHEMA, stage=SYNTH_STAGE)
         findings, dropped = verify_claims(data.get("findings", []), member_by_id)
 
         lines = [str(data.get("overview", "")).strip(), ""]
@@ -496,7 +502,7 @@ def _classify_members(
         f"Study: {study.name}\nDescription: {study.description}\n\n"
         f"All conversations:\n\n{index}"
     )
-    data = llm.chat_json(system, user, schema=MEMBERSHIP_SCHEMA)
+    data = llm.chat_json(system, user, schema=MEMBERSHIP_SCHEMA, stage=SYNTH_STAGE)
     ids = {str(i).strip() for i in data.get("member_ids", [])}
     return [by_id[i] for i in ids if i in by_id]
 
@@ -562,7 +568,7 @@ def prep(cfg: Config, llm: LLM, records: list[NoteRecord], today: date) -> dict:
             f"With: {names}\n\nConversation history with them:\n\n{corpus}"
         )
         try:
-            data = llm.chat_json(PREP_SYSTEM, user, schema=PREP_SCHEMA)
+            data = llm.chat_json(PREP_SYSTEM, user, schema=PREP_SCHEMA, stage=SYNTH_STAGE)
         except LLMError as e:
             print(f"[synthesize] prep failed for {ev.title!r}: {e}", file=sys.stderr)
             continue

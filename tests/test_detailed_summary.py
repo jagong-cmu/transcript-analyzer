@@ -9,6 +9,7 @@ from datetime import date
 from transcript_analyzer.models import Insight, Transcript
 from transcript_analyzer.obsidian import writer
 from transcript_analyzer.pipeline import indexer, insights
+from transcript_analyzer.titles import ABSTRACT_CHARS
 
 LONG = (
     "### Opening\n\nThe class opened with a recap of last week.\n\n"
@@ -95,7 +96,7 @@ def test_a_legacy_fallback_abstract_is_bounded(cfg):
         encoding="utf-8",
     )
     rec = indexer.parse_note(path)
-    assert len(rec.summary) <= indexer._ABSTRACT_FALLBACK_CHARS
+    assert len(rec.summary) <= ABSTRACT_CHARS
     assert len(rec.detailed_summary) > len(rec.summary)
 
 
@@ -176,3 +177,61 @@ def test_course_identity_is_not_recorded_for_a_non_lecture():
         transcript(),
     )
     assert (insight.course_code, insight.course_name) == ("", "")
+
+
+def test_a_model_abstract_that_ignores_the_length_rule_is_bounded(cfg):
+    """The PRIMARY path is not trusted either, only the fallbacks were.
+
+    Ask sends every abstract on every question, so a model that answers the
+    "ONE paragraph, 2-4 sentences" field with three thousand words must not be
+    able to inflate the corpus. The bound is enforced in code, not asked for
+    in the prompt.
+    """
+    import frontmatter
+
+    runaway = "The class covered a great many things. " * 200
+    insight = insights.insight_from_payload(
+        {
+            "title": "Row reduction",
+            "abstract": runaway,
+            "detailed_summary": LONG,
+            "key_points": ["A point"],
+            "action_items": [],
+            "people": [],
+            "topics": [],
+            "kind": "lecture",
+        },
+        transcript(),
+    )
+
+    assert len(runaway) > ABSTRACT_CHARS
+    assert len(insight.summary) <= ABSTRACT_CHARS
+
+    path = write(cfg, insight)
+    # The note's frontmatter is the retrieval field's on-disk contract.
+    assert len(str(frontmatter.load(str(path))["abstract"])) <= ABSTRACT_CHARS
+
+    rec = indexer.parse_note(path)
+    assert len(rec.summary) <= ABSTRACT_CHARS
+    # And the long summary is untouched: only the retrieval field is bounded.
+    assert "elimination steps" in rec.detailed_summary
+
+
+def test_the_abstract_and_the_legacy_fallback_share_one_bound(cfg):
+    """Two definitions drifting apart is how the corpus grew back before."""
+    from transcript_analyzer.titles import retrieval_abstract
+
+    long_detailed = "First paragraph. " * 200
+    insight = insights.insight_from_payload(
+        {"title": "T", "abstract": "", "detailed_summary": long_detailed},
+        transcript(),
+    )
+    legacy = cfg.vault.insights_path / "2026-01-03 legacy.md"
+    legacy.write_text(
+        "---\nsource: pocket\ndate: 2026-01-03\ntranscript_id: old3\n---\n\n"
+        f"## Summary\n{long_detailed}\n",
+        encoding="utf-8",
+    )
+
+    assert insight.summary == retrieval_abstract(long_detailed)
+    assert indexer.parse_note(legacy).summary == insight.summary

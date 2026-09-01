@@ -39,8 +39,10 @@ across the Python versions `pyproject` declares (3.10–3.12) — a change has t
   carries. Every corpus-wide reader (digests, dossiers, study rollups, category rollups,
   `rag.py`) reads `rec.summary`, and Ask sends every one of them on every question — so
   putting the long summary in that field silently triples the corpus (~58k tokens to ~165k).
-  A note written before the split has no `abstract:`; `indexer._abstract_from` bounds the
-  fallback for the same reason. `rec.detailed_summary` is the long one.
+  The bound is ONE function, `titles.retrieval_abstract` (`titles.ABSTRACT_CHARS`), applied to
+  the model's own `abstract` field in `insights.insight_from_payload` AND to the fallback
+  `indexer.parse_note` uses for a note written before the split — a bound enforced on the
+  fallbacks only is not a bound. `rec.detailed_summary` is the long one.
 - **The note BODY is parsed back too, so it is an interface, not formatting.** Free text
   written into it must go through `writer._one_line` (list items, which the indexer prefers
   over the frontmatter list) or `writer._body_text` (the summary, where a heading-shaped line
