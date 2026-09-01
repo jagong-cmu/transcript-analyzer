@@ -595,3 +595,28 @@ def test_a_discarded_download_is_fetched_again_on_the_next_sync(cfg, monkeypatch
     third = run()
     assert third["processed"] == 0 and third["skipped"] == 1
     assert fetched == ["n1", "n1"], "a settled recording was fetched again"
+
+
+def test_study_notes_follow_a_retitle(cfg, monkeypatch):
+    """A lecture's study notes and PDF are keyed on the note stem too, so a
+    re-worded headline has to carry them across or the note links at nothing."""
+    from transcript_analyzer.models import Insight
+
+    transcript = _transcript()
+    old_note = writer.write_note(
+        cfg, transcript, Insight(headline="Old lecture name", summary="Old.")
+    )
+    study = writer.write_study_note(cfg, old_note, transcript.id, "notes")
+    writer.write_study_pdf(study, transcript.id, b"%PDF ours")
+    with get_conn(cfg.db_path) as conn:
+        record_sync(conn, transcript.source, transcript.native_id, "oldhash",
+                    str(old_note), datetime.now(timezone.utc).isoformat())
+
+    new_insight = Insight(headline="Row reducing a 3x3 matrix", summary="New.")
+    monkeypatch.setattr(sync, "extract_insight", lambda *a, **k: new_insight)
+    res = sync.process_transcript(cfg, transcript, llm=None)
+
+    new_note = Path(res["note_path"])
+    moved = writer.study_note_path_for(cfg, new_note)
+    assert moved.exists() and not study.exists()
+    assert writer.study_pdf_for(moved).read_bytes() == b"%PDF ours"

@@ -5,8 +5,9 @@ Updates each note's `headline` frontmatter and H1 to:
   Pricing deck review with Angela, July 1st, 2026
 
 By default uses Claude for accurate headlines. Pass --cheap to derive from
-the existing summary (no API calls). Renames files (and matching audio) to
-match the new headline slug, then reindexes.
+the existing summary (no API calls). Renames files — and the matching audio
+and lecture study notes, each proven to be this transcript's at both ends —
+to match the new headline slug, then reindexes.
 
 Usage:
     python scripts/retitle_notes.py
@@ -97,12 +98,19 @@ def _rename_with_audio(cfg, old: Path, new: Path, transcript_id: str, *, dry_run
         return new
     new.parent.mkdir(parents=True, exist_ok=True)
     old_audio = writer.audio_path_for(cfg, old)
+    old_study = writer.study_note_path_for(cfg, old)
+    # Both moves run BEFORE the rename: each proves ownership through the note
+    # at the source stem, and after the rename that stem no longer holds it.
     new_audio = writer.move_audio_with_note(cfg, old, new, transcript_id)
+    new_study = writer.move_study_with_note(cfg, old, new, transcript_id)
     old.rename(new)
-    if new_audio is not None:
-        # Fix embed reference inside the note if present.
+    if new_audio is not None or new_study is not None:
+        # Fix the links inside the note, which name files by stem.
         text = new.read_text(encoding="utf-8")
-        text = text.replace(f"![[{old_audio.name}]]", f"![[{new_audio.name}]]")
+        if new_audio is not None:
+            text = text.replace(f"![[{old_audio.name}]]", f"![[{new_audio.name}]]")
+        if new_study is not None:
+            text = text.replace(f"[[{old_study.stem}", f"[[{new_study.stem}")
         new.write_text(text, encoding="utf-8")
     with get_conn(cfg.db_path) as conn:
         # note_path is not unique — sync_state is keyed on (source, native_id),

@@ -38,59 +38,36 @@ import frontmatter  # noqa: E402
 
 from transcript_analyzer.config import load_config  # noqa: E402
 from transcript_analyzer.db import canonical_note_path, get_conn, record_sync  # noqa: E402
-from transcript_analyzer.obsidian.writer import _quote_block  # noqa: E402
-from transcript_analyzer.pipeline.indexer import (  # noqa: E402
-    _extract_transcript,
-    index_note,
-    is_section_start,
+from transcript_analyzer.obsidian.writer import (  # noqa: E402
+    _quote_block,
+    transcript_bounds,
 )
-
-
-def _is_transcript_heading(line: str) -> bool:
-    """The same heading rule indexer._extract_transcript matches on.
-
-    A stricter rule here would be worse than a no-op: _already_timed reads the
-    transcript through the indexer's rule, so on a hand-edited '## transcript'
-    the two would disagree and a SECOND callout would be appended instead of
-    the existing one being rewritten.
-    """
-    return is_section_start(line, "## transcript")
-
-
-def _section_end(lines: list[str], start: int) -> int:
-    """Index of the last line of the transcript section that starts at `start`.
-
-    The section is exactly one grammar: the heading, an optional run of blank
-    lines, then the contiguous run of '>' lines that is the callout. It ends
-    there — a blank line, a callout the owner appended, or any later section
-    belongs to them, not to this script. When no callout follows the heading,
-    the section is the heading alone, so nothing of theirs is spliced away.
-    """
-    i = start + 1
-    while i < len(lines) and not lines[i].strip():
-        i += 1
-    if i >= len(lines) or not lines[i].startswith(">"):
-        return start
-    while i + 1 < len(lines) and lines[i + 1].startswith(">"):
-        i += 1
-    return i
+from transcript_analyzer.pipeline.indexer import (  # noqa: E402
+    extract_transcript,
+    index_note,
+)
 
 
 def _replace_transcript_section(content: str, timed_text: str) -> str:
     """Rewrite only the '## Transcript' callout, leaving the rest of the note.
+
+    Where that section starts and ends is `writer.transcript_bounds` — the one
+    definition, shared with the writer that emits the callout and the indexer
+    that reads it back. A stricter rule here would be worse than a no-op:
+    `_already_timed` reads the transcript through the indexer, so on a
+    hand-edited '## transcript' the two would disagree and a SECOND callout
+    would be appended instead of the existing one being rewritten.
 
     The vault is the source of truth and hand-edits are respected, so anything
     the owner appended below the callout must survive this migration.
     """
     block = "## Transcript\n" + _quote_block(timed_text)
     lines = content.splitlines()
-    start = next(
-        (i for i, ln in enumerate(lines) if _is_transcript_heading(ln)), None
-    )
-    if start is None:
+    bounds = transcript_bounds(lines)
+    if bounds is None:
         return content.rstrip() + "\n\n" + block + "\n"
 
-    end = _section_end(lines, start)
+    start, end = bounds
     # Transcript text is arbitrary content, so it must never be used as a
     # re.sub template — a stray backslash raises "bad escape" (or worse,
     # silently expands a group reference). Splicing the lines is literal.
@@ -183,7 +160,7 @@ def backfill(*, source: str | None, limit: int | None, dry_run: bool, force: boo
             continue
 
         # Peek existing transcript for skip
-        existing = _extract_transcript(post.content)
+        existing = extract_transcript(post.content)
         if _already_timed(existing) and not force:
             skipped += 1
             continue
