@@ -11,6 +11,9 @@ Tests need no config.toml or network; `tests/conftest.py` builds a `Config` over
 Runtime code resolves config via `$TRANSCRIPT_ANALYZER_CONFIG`, else `config.toml`, else
 `config.example.toml` (see `config.py:_config_file`) — set that env var to exercise the app
 against a scratch vault instead of the real one.
+`.github/workflows/tests.yml` runs that same suite on pushes to `main` and PRs against it,
+across the Python versions `pyproject` declares (3.10–3.12) — a change has to work on the
+3.10 floor, not only in the local venv.
 
 ## Sharp edges
 
