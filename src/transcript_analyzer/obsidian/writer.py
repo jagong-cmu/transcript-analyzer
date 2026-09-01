@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from collections import defaultdict
 from pathlib import Path
 
@@ -25,6 +26,11 @@ from ..models import Insight, Transcript
 from ..titles import clean_headline, compose_display_title, format_long_date
 
 _log = logging.getLogger(__name__)
+
+# How long an in-flight download marker keeps its claim on a stem. Well past
+# the downloader's own 300s timeout, so a live stream is never mistaken for an
+# abandoned one — and a marker a crash left behind stops blocking eventually.
+PARTIAL_DOWNLOAD_TTL_SECONDS = 20 * 60
 
 CATEGORIES_SUBDIR = "Categories"
 ATTACHMENTS_SUBDIR = "Attachments"
@@ -94,6 +100,23 @@ def audio_partial(audio_path: Path) -> Path:
     for the whole download instead of looking free until the last moment.
     """
     return audio_path.with_suffix(audio_path.suffix + ".part")
+
+
+def partial_claims_stem(audio_path: Path) -> bool:
+    """Whether an in-flight download still holds a claim on this stem.
+
+    The marker carries no owner, and a process killed mid-stream (a laptop
+    losing power) leaves one behind that nothing cleans up — so the claim is
+    bounded by age rather than trusted forever: past
+    `PARTIAL_DOWNLOAD_TTL_SECONDS` it is treated as abandoned and the stem is
+    claimable again. A live download is never mistaken for an abandoned one,
+    the window being far longer than the download's own timeout.
+    """
+    try:
+        age = time.time() - audio_partial(audio_path).stat().st_mtime
+    except OSError:
+        return False
+    return age < PARTIAL_DOWNLOAD_TTL_SECONDS
 
 
 def move_audio_with_note(
@@ -275,9 +298,9 @@ def claimable_stem(
     note the owner renamed away from being unlinked by, or played back inside,
     somebody else's note.
 
-    `in_flight_download` is for the downloader itself, which is holding the
-    partial it is about to become and must not read its own file as someone
-    else's claim. Every other caller leaves it False.
+    `in_flight_download` is for a downloader about to replace the destination
+    with the partial it has just finished, which would otherwise read that
+    partial as a claim against itself. Every other caller leaves it False.
     """
     if owns_note(note_path, transcript_id):
         return True
@@ -286,7 +309,7 @@ def claimable_stem(
     audio = audio_for_stem(note_path.parent, note_path.stem)
     if audio.exists():
         return False
-    return in_flight_download or not audio_partial(audio).exists()
+    return in_flight_download or not partial_claims_stem(audio)
 
 
 def claim_note_path(base: Path, transcript_id: str) -> Path:
@@ -409,9 +432,10 @@ def write_note(
     If something else did take that path while the recording streamed, the
     claim is redone and the recording NEVER follows: the stem belongs to
     whoever took it, so its mp3 is theirs and this note is written with no
-    embed at all rather than one naming a file it does not own. Either way the
-    name in the body and the file on disk cannot disagree, and nothing unowned
-    is written over.
+    embed at all rather than one naming a file it does not own — and it stays
+    without one until the transcript itself changes. Either way the name in the
+    body and the file on disk cannot disagree, and nothing unowned is written
+    over.
     """
     if path is None:
         path = note_path_for(cfg, transcript, insight)

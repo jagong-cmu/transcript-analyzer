@@ -39,6 +39,10 @@ _log = logging.getLogger(__name__)
 
 FAILURE_COUNTER_KEY = "insight_failures_total"
 
+# Marks a sync_state row whose note is written but whose recording still has to
+# be fetched, so the stored hash cannot match and the next pass reprocesses it.
+AUDIO_RETRY_HASH_SUFFIX = ":audio-retry"
+
 
 def _high_water_key(source: str) -> str:
     return f"{source}_last_created_at"
@@ -79,19 +83,30 @@ def _limited(it: Iterable[Transcript], limit: Optional[int]) -> Iterable[Transcr
         yield x
 
 
-def _maybe_download_audio(cfg: Config, transcript: Transcript, note_path: Path) -> Optional[str]:
-    """Download a Pocket recording's audio into the vault. Returns the filename to embed."""
+def _maybe_download_audio(
+    cfg: Config, transcript: Transcript, note_path: Path
+) -> tuple[Optional[str], bool]:
+    """Download a Pocket recording's audio into the vault.
+
+    Returns (filename to embed, still owed). Audio is best effort, so an
+    unavailable recording or a failed fetch is simply no embed — but a
+    download DISCARDED because its stem was taken mid-stream is work this
+    transcript still owes, and saying so is what stops the hash-idempotent
+    sync from remembering it as done and never fetching it again.
+    """
     if transcript.source != "pocket" or not cfg.pocket.download_audio:
-        return None
-    from .connectors.pocket_api import PocketClient  # lazy (needs key)
+        return None, False
+    from .connectors.pocket_api import AudioStemTaken, PocketClient  # lazy (needs key)
 
     dest = writer.audio_path_for(cfg, note_path)
     try:
         with PocketClient(cfg) as pc:
             got = pc.download_audio(transcript.native_id, dest, transcript.id)
+    except AudioStemTaken:
+        return None, True
     except Exception:  # noqa: BLE001 - audio is best-effort, never fail the note
-        return None
-    return dest.name if got else None
+        return None, False
+    return (dest.name if got else None), False
 
 
 def _owned_prev_note(prev_path: Optional[str], transcript: Transcript) -> Optional[Path]:
@@ -182,7 +197,7 @@ def process_transcript(
         writer.move_audio_with_note(cfg, prev_note, prospective, transcript.id)
 
     # Download the recording's audio into the vault (Pocket only) and embed it.
-    audio_name = _maybe_download_audio(cfg, transcript, prospective)
+    audio_name, audio_still_owed = _maybe_download_audio(cfg, transcript, prospective)
 
     # The claim above is the ONE decision: the download wrote the mp3 against
     # it and the body embeds that name, so the note has to land on it too.
@@ -199,10 +214,16 @@ def process_transcript(
 
     # Index the note we just wrote (parses it back -> sqlite).
     index_note(cfg, note_path)
+    # Recording the transcript's own hash is what makes the next pass skip it,
+    # so a discarded recording is stored under a hash that cannot match: the
+    # note is complete, but the audio is still owed and has to be re-fetched.
+    synced_hash = (
+        transcript.hash + AUDIO_RETRY_HASH_SUFFIX if audio_still_owed else transcript.hash
+    )
     with get_conn(cfg.db_path) as conn:
         record_sync(
             conn, transcript.source, transcript.native_id,
-            transcript.hash, canonical_note_path(note_path), _now(),
+            synced_hash, canonical_note_path(note_path), _now(),
         )
     return result
 

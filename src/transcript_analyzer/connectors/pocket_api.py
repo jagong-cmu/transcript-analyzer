@@ -30,6 +30,15 @@ class PocketAuthError(RuntimeError):
     pass
 
 
+class AudioStemTaken(RuntimeError):
+    """A finished download was discarded: its stem now belongs to another note.
+
+    Distinct from an ordinary download failure because it is an expected
+    outcome with a known remedy — fetch it again once this transcript holds a
+    stem of its own — rather than a missing or unavailable recording.
+    """
+
+
 def _parse_date(val) -> date:
     if not val:
         return date.today()
@@ -110,8 +119,9 @@ class PocketClient:
         replace. A check made at the start cannot carry a multi-minute
         download: a retitle pass or another sync can legitimately take that
         stem meanwhile, and replacing then destroys THEIR recording in a vault
-        with no backup. Unproven means the finished file is discarded and the
-        next sync downloads under a stem this transcript does own.
+        with no backup. Unproven means the finished file is discarded and
+        `AudioStemTaken` is raised, which the sync records as work still owed
+        so the next pass fetches it again under a stem this transcript owns.
         """
         if dest.exists() and dest.stat().st_size > 0:
             return dest  # already downloaded
@@ -135,9 +145,11 @@ class PocketClient:
                     rec_id, dest,
                 )
                 tmp.unlink(missing_ok=True)
-                return None
+                raise AudioStemTaken(str(dest))
             tmp.replace(dest)
             return dest
+        except AudioStemTaken:
+            raise
         except Exception:  # noqa: BLE001
             tmp.unlink(missing_ok=True)
             return None

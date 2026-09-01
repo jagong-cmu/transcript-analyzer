@@ -11,6 +11,19 @@ Usage:
     python scripts/backfill_timestamps.py
     python scripts/backfill_timestamps.py --source pocket --limit 20
     python scripts/backfill_timestamps.py --dry-run
+
+Skips you may see, and what to do about them:
+    "N sync_state rows point at this note" — the note cannot be traced back to
+    exactly one recording, so nothing is fetched or written: guessing would put
+    another conversation's transcript into this note. It happens when a note was
+    deleted and a later recording took its filename. To resolve it by hand, open
+    the note, read its `transcript_id`, and point the wrong row(s) elsewhere:
+        sqlite3 data/index.db \\
+          "SELECT source, native_id, note_path FROM sync_state WHERE note_path = '<path>';"
+    The row that belongs to this note is the one whose (source, native_id)
+    hashes to that `transcript_id` (`transcript_analyzer.models.stable_id`);
+    clear `note_path` on the others, then re-run. Nothing is written until the
+    lookup resolves to a single row.
 """
 from __future__ import annotations
 

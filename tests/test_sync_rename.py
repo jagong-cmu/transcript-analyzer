@@ -11,6 +11,8 @@ from dataclasses import replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from transcript_analyzer import sync
 from transcript_analyzer.db import get_conn, record_sync
 from transcript_analyzer.models import Insight, Transcript
@@ -236,7 +238,7 @@ def test_a_path_taken_during_the_download_keeps_the_body_and_the_disk_in_step(
         audio = writer.audio_path_for(cfg_, note_path)
         audio.parent.mkdir(parents=True, exist_ok=True)
         audio.write_bytes(b"stranger-recording")
-        return audio.name
+        return audio.name, False
 
     monkeypatch.setattr(sync, "_maybe_download_audio", download_while_someone_takes_the_path)
 
@@ -496,9 +498,9 @@ def test_a_finished_download_never_replaces_a_stem_taken_while_it_streamed(
         logging.WARNING, logger="transcript_analyzer.connectors.pocket_api"
     ):
         with pocket_api.PocketClient(cfg) as pc:
-            got = pc.download_audio("rec1", dest, transcript.id)
+            with pytest.raises(pocket_api.AudioStemTaken):
+                pc.download_audio("rec1", dest, transcript.id)
 
-    assert got is None
     assert dest.read_bytes() == b"stranger-recording", "a stranger's recording was replaced"
     assert not writer.audio_partial(dest).exists(), "the discarded download was left behind"
     assert str(dest) in caplog.text
@@ -520,3 +522,76 @@ def test_a_download_onto_a_free_stem_still_lands(cfg, monkeypatch):
     assert got == dest
     assert dest.read_bytes() == b"our-audio"
     assert not writer.audio_partial(dest).exists()
+
+
+class _StubLLM:
+    """The budget/kill-switch gate sync() consults before a pass."""
+
+    def __init__(self, cfg):
+        pass
+
+    def health(self):
+        return {
+            "ok": True,
+            "kill_switch": False,
+            "key_configured": True,
+            "month_spend_usd": 0.0,
+            "monthly_budget_usd": 5.0,
+        }
+
+
+def test_a_discarded_download_is_fetched_again_on_the_next_sync(cfg, monkeypatch):
+    """A discard is work still owed, not work done.
+
+    process_transcript records the transcript's hash and sync() skips anything
+    whose stored hash matches, so remembering a discarded recording as success
+    left the note without its player until the upstream text changed.
+    """
+    cfg = _pocket_cfg(cfg)
+    transcript = Transcript(
+        id="t1",
+        source="pocket",
+        native_id="n1",
+        title="Raw source title",
+        date=date(2026, 7, 1),
+        text="Angela: we should ship the pricing deck this quarter. " * 40,
+    )
+    insight = Insight(headline="Pricing deck review with Angela", summary="S.")
+    monkeypatch.setattr(sync, "extract_insight", lambda *a, **k: insight)
+    monkeypatch.setattr(sync, "_iter_source", lambda *a, **k: iter([transcript]))
+    monkeypatch.setattr(sync, "LLM", _StubLLM)
+
+    from transcript_analyzer.connectors import pocket_api
+
+    fetched = []
+
+    def discard_then_succeed(self, rec_id, dest, transcript_id):
+        fetched.append(rec_id)
+        if len(fetched) == 1:
+            raise pocket_api.AudioStemTaken(str(dest))
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"our-recording")
+        return dest
+
+    monkeypatch.setattr(pocket_api.PocketClient, "download_audio", discard_then_succeed)
+
+    def run():
+        return sync.sync(cfg, sources=["pocket"], synthesize_after=False, verbose=False)
+
+    first = run()
+    assert first["processed"] == 1 and first["skipped"] == 0
+    note = Path(first["items"][0]["note_path"])
+    assert "![[" not in note.read_text(encoding="utf-8"), "embedded a discarded recording"
+
+    second = run()
+    assert second["processed"] == 1, "the discarded recording was never fetched again"
+    assert fetched == ["n1", "n1"]
+    note = Path(second["items"][0]["note_path"])
+    audio = writer.audio_path_for(cfg, note)
+    assert audio.read_bytes() == b"our-recording"
+    assert f"![[{audio.name}]]" in note.read_text(encoding="utf-8")
+
+    # Nothing owed now: an unchanged transcript still short-circuits.
+    third = run()
+    assert third["processed"] == 0 and third["skipped"] == 1
+    assert fetched == ["n1", "n1"], "a settled recording was fetched again"

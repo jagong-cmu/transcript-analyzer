@@ -45,9 +45,10 @@ against a scratch vault instead of the real one.
   transcript's own.** `writer.owns_note` is the proof (the note's `transcript_id`, read
   back); unknown for ANY reason — no id line, unreadable, permission denied — means NOT
   ours. `writer.claim_note_path` is the one definition of "where may this note go", and it
-  claims the whole stem: the note AND the `Attachments/<stem>.mp3` that only a note can
-  claim: the note, the `Attachments/<stem>.mp3` that only a note can claim, and any
-  `writer.audio_partial` still streaming towards it. All seven destructive paths go through
+  claims the whole stem: the note, the `Attachments/<stem>.mp3` that only a note can claim,
+  and any `writer.audio_partial` still streaming towards it (a marker that stops claiming
+  once it is older than `writer.PARTIAL_DOWNLOAD_TTL_SECONDS`, since a crash leaves one
+  behind and nothing sweeps them). All seven destructive paths go through
   them — write (`note_path_for`), rename (`scripts/retitle_notes.py:_target_path`), delete
   (`sync._is_stale_note`, via `sync._owned_prev_note`), the audio move at BOTH ends, source
   and destination (`writer.move_audio_with_note`; the move runs before the rename in

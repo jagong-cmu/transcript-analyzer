@@ -28,6 +28,7 @@ from slugify import slugify  # noqa: E402
 
 from transcript_analyzer.config import load_config  # noqa: E402
 from transcript_analyzer.db import canonical_note_path, get_conn  # noqa: E402
+from transcript_analyzer.models import stable_id  # noqa: E402
 from transcript_analyzer.obsidian import writer  # noqa: E402
 from transcript_analyzer.pipeline.indexer import (  # noqa: E402
     _extract_h1,
@@ -104,10 +105,19 @@ def _rename_with_audio(cfg, old: Path, new: Path, transcript_id: str, *, dry_run
         text = text.replace(f"![[{old_audio.name}]]", f"![[{new_audio.name}]]")
         new.write_text(text, encoding="utf-8")
     with get_conn(cfg.db_path) as conn:
-        conn.execute(
-            "UPDATE sync_state SET note_path = ? WHERE note_path = ?",
-            (canonical_note_path(new), canonical_note_path(old)),
-        )
+        # note_path is not unique — sync_state is keyed on (source, native_id),
+        # and a deleted-then-retaken filename legitimately leaves two rows
+        # holding one path. Move only the row this note can prove is its own.
+        for row in conn.execute(
+            "SELECT source, native_id FROM sync_state WHERE note_path = ?",
+            (canonical_note_path(old),),
+        ).fetchall():
+            if stable_id(row["source"], row["native_id"]) != transcript_id:
+                continue
+            conn.execute(
+                "UPDATE sync_state SET note_path = ? WHERE source = ? AND native_id = ?",
+                (canonical_note_path(new), row["source"], row["native_id"]),
+            )
     return new
 
 

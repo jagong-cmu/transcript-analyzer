@@ -7,6 +7,8 @@ owner already used. Ownership therefore has to be read back off the target,
 never inferred from the absence of a transcript_id.
 """
 import importlib.util
+import os
+import time
 from datetime import date
 from pathlib import Path
 
@@ -239,3 +241,94 @@ def test_a_stem_being_downloaded_to_is_already_claimed(cfg):
     assert path.name == "2026-07-01 pricing-deck-review (t2fedc).md"
     assert not (cfg.vault.insights_path / BASE_NAME).exists()
     assert partial.read_bytes() == b"half a recording"
+
+
+def test_an_abandoned_download_marker_stops_claiming_the_stem(cfg):
+    """A '.part' claim is bounded by age, because nothing cleans one up.
+
+    A sync killed mid-stream (this laptop sleeps) leaves the marker behind, and
+    an unbounded claim would push every later note off that stem for the life
+    of the vault — including the interrupted transcript's own re-sync.
+    """
+    audio = writer.audio_for_stem(
+        cfg.vault.insights_path, "2026-07-01 pricing-deck-review"
+    )
+    partial = writer.audio_partial(audio)
+    partial.parent.mkdir(parents=True, exist_ok=True)
+    partial.write_bytes(b"half a recording")
+    abandoned = time.time() - (writer.PARTIAL_DOWNLOAD_TTL_SECONDS + 60)
+    os.utime(partial, (abandoned, abandoned))
+
+    path = writer.write_note(cfg, _transcript(), _insight())
+
+    assert path.name == BASE_NAME
+    assert partial.read_bytes() == b"half a recording"
+
+
+def test_a_live_download_marker_still_claims_the_stem(cfg):
+    """The other direction: a stream in progress keeps its stem."""
+    audio = writer.audio_for_stem(
+        cfg.vault.insights_path, "2026-07-01 pricing-deck-review"
+    )
+    partial = writer.audio_partial(audio)
+    partial.parent.mkdir(parents=True, exist_ok=True)
+    partial.write_bytes(b"half a recording")
+    fresh = time.time() - 30
+    os.utime(partial, (fresh, fresh))
+
+    path = writer.write_note(cfg, _transcript(), _insight())
+
+    assert path.name == SUFFIXED_NAME
+    assert not (cfg.vault.insights_path / BASE_NAME).exists()
+
+
+NOTE_WITH_REAL_ID = """---
+source: granola
+date: 2026-07-01
+transcript_id: {tid}
+headline: "Pricing deck review"
+---
+
+# raw source title
+
+## Summary
+Angela agreed to review the pricing deck.
+"""
+
+
+def test_retitle_moves_only_the_sync_state_row_that_owns_the_note(cfg, monkeypatch):
+    """sync_state is keyed on (source, native_id), so note_path is not unique.
+
+    Rewriting every row that happens to share the path silently repointed
+    another transcript's remembered note at this one's file — after which that
+    transcript loses its stale-note cleanup and this one loses its backfill.
+    """
+    from datetime import datetime, timezone
+
+    from transcript_analyzer.db import (
+        canonical_note_path,
+        get_conn,
+        get_sync_note_path,
+        record_sync,
+    )
+    from transcript_analyzer.models import stable_id
+
+    monkeypatch.setattr(retitle_notes, "load_config", lambda: cfg)
+    ours = stable_id("granola", "MINE")
+    old = cfg.vault.insights_path / "2026-07-01 raw-source-title.md"
+    old.write_text(NOTE_WITH_REAL_ID.format(tid=ours), encoding="utf-8")
+    with get_conn(cfg.db_path) as conn:
+        for native in ("MINE", "SOMEONE-ELSE"):
+            record_sync(
+                conn, "granola", native, "hash",
+                canonical_note_path(old), datetime.now(timezone.utc).isoformat(),
+            )
+
+    result = retitle_notes.retitle(cheap=True)
+
+    assert result["updated"] == 1 and result["errors"] == 0
+    moved = cfg.vault.insights_path / BASE_NAME
+    assert moved.exists()
+    with get_conn(cfg.db_path) as conn:
+        assert get_sync_note_path(conn, "granola", "MINE") == canonical_note_path(moved)
+        assert get_sync_note_path(conn, "granola", "SOMEONE-ELSE") == canonical_note_path(old)

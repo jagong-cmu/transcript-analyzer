@@ -139,6 +139,11 @@ carries `[M:SS]` lines. `--force` overrides either.
 ./.venv/bin/python scripts/backfill_timestamps.py
 ```
 
+A backfill note skipped with "N sync_state rows point at this note" cannot be
+traced to a single recording, so it is left alone rather than filled in with
+someone else's transcript; `scripts/backfill_timestamps.py --help` describes how
+to resolve it by hand.
+
 ### Background automation (launchd)
 
 ```bash
