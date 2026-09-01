@@ -44,21 +44,27 @@ against a scratch vault instead of the real one.
 - **Nothing is written, renamed or deleted at a vault path that is not PROVABLY that
   transcript's own.** `writer.owns_note` is the proof (the note's `transcript_id`, read
   back); unknown for ANY reason — no id line, unreadable, permission denied — means NOT
-  ours. `writer.claim_note_path` is the one definition of "where may this note go", and it
-  claims the whole stem: the note, the `Attachments/<stem>.mp3` that only a note can claim,
-  and any `writer.audio_partial` still streaming towards it (a marker that stops claiming
-  once it is older than `writer.PARTIAL_DOWNLOAD_TTL_SECONDS`, since a crash leaves one
-  behind and nothing sweeps them). All seven destructive paths go through
-  them — write (`note_path_for`), rename (`scripts/retitle_notes.py:_target_path`), delete
-  (`sync._is_stale_note`, via `sync._owned_prev_note`), the audio move at BOTH ends, source
-  and destination (`writer.move_audio_with_note`; the move runs before the rename in
-  `_rename_with_audio`, because after it the source stem no longer holds the note that
-  proves the recording is ours), and the download's final replace
-  (`connectors/pocket_api.download_audio`, re-proven after the stream because a check made
-  minutes earlier is not a claim). A path that cannot be proven ours is left alone and
-  logged: the vault has no backup, so an orphan to clean up by hand beats a deletion that
-  cannot be undone. Extend a destructive path by adding a call site here, never an eighth
-  ownership rule.
+  ours. `writer.claimable_stem` carries that proof to the whole stem — the note, the
+  `Attachments/<stem>.mp3` that only a note can claim, and any `writer.audio_partial` still
+  streaming towards it (a marker that stops claiming once it is older than
+  `writer.PARTIAL_DOWNLOAD_TTL_SECONDS`, since a crash leaves one behind and nothing sweeps
+  them) — and `writer.claim_note_path`, built on it, is the one definition of "where may
+  this note go". All seven destructive paths go through those three — write
+  (`note_path_for`), the re-claim inside `writer.write_note` when the path its caller
+  already claimed was taken while the recording streamed, rename
+  (`scripts/retitle_notes.py:_target_path`), delete (`sync._is_stale_note`, via
+  `sync._owned_prev_note`), the audio move at BOTH ends, source and destination
+  (`writer.move_audio_with_note`; the move runs before the rename in `_rename_with_audio`,
+  because after it the source stem no longer holds the note that proves the recording is
+  ours), and the download's final replace (`connectors/pocket_api.download_audio`, re-proven
+  after the stream because a check made minutes earlier is not a claim). A path that cannot
+  be proven ours is left alone and logged: the vault has no backup, so an orphan to clean up
+  by hand beats a deletion that cannot be undone. Extend a destructive path by adding a call
+  site here, never an eighth ownership rule. The index owes the same proof: `sync_state` is
+  keyed on `(source, native_id)`, so its `note_path` is NOT unique — a row is this note's
+  only when `models.stable_id(source, native_id)` matches the note's `transcript_id`, and an
+  ambiguous match means do nothing (`retitle_notes._rename_with_audio`,
+  `backfill_timestamps._sync_row_for`).
 - Scripts under `scripts/` write to the *live* vault and call the Pocket/Granola/Anthropic
   APIs. Use `--dry-run`/`--limit` when exercising them.
 

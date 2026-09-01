@@ -2,9 +2,10 @@
 
 Canonical line form when timing is known:
 
-    [01:23] Speaker: hello there
+    [1:23] Speaker: hello there
 
-Indexer and the web UI parse the ``[H:]MM:SS`` prefix. Clicking it seeks the
+Indexer and the web UI parse that prefix — ``[M:SS]``, or ``[H:MM:SS]`` past an
+hour; a leading-zero minute is accepted on the way in. Clicking it seeks the
 HTML5 audio player (Pocket recordings that have an mp3 in Attachments/).
 """
 from __future__ import annotations

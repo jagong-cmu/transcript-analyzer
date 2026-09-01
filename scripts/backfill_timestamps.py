@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Backfill [MM:SS] timestamps into existing insight notes from the source APIs.
+"""Backfill [M:SS] timestamps into existing insight notes from the source APIs.
 
 Rewrites only the ## Transcript section (no new insight LLM calls). Updates
 sync_state content hashes so the next sync won't reprocess these as "changed".

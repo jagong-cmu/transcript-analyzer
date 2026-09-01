@@ -158,6 +158,10 @@ bash scripts/install_launchd.sh uninstall
 - `src/transcript_analyzer/pipeline/` — `llm.py` (Claude API + cost guard), `quality.py` (junk
   filter), `insights.py`, `synthesize.py` (digest/dossiers/studies/prep), `organize.py`, `indexer.py`
 - `src/transcript_analyzer/obsidian/writer.py` — transcript notes + managed-region synthesis writes
+- `src/transcript_analyzer/titles.py` — note titles (headline + long date), shared by the writer,
+  indexer and insight extraction
+- `src/transcript_analyzer/transcript_fmt.py` — `[M:SS]` transcript lines, shared by both
+  connectors and the dashboard's seek links
 - `src/transcript_analyzer/calendar_feed.py` — ICS feed for meeting prep
 - `src/transcript_analyzer/sync.py` — orchestrator (`--source`, `--limit`, `--dry-run`, `--force`,
   `--no-synthesis`)
