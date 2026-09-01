@@ -14,6 +14,7 @@ the system from summarizing its own summaries in an unattended 20-minute loop:
 """
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 from typing import Optional
@@ -23,6 +24,10 @@ import frontmatter
 from ..config import Config
 from ..db import get_conn, upsert_transcript
 from ..models import Attendee, NoteRecord
+from ..obsidian.writer import heading_level, opens_section
+from ..titles import clean_headline, compose_display_title, headline_from_summary
+
+_log = logging.getLogger(__name__)
 
 _WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 _CHECKBOX_RE = re.compile(r"^\s*-\s*\[( |x|X)\]\s*(.+?)\s*$")
@@ -33,44 +38,77 @@ EXCLUDED_SUBDIRS = frozenset(
 )
 
 
+def is_section_start(line: str, heading: str) -> bool:
+    """Whether `line` opens the named section ('## transcript', lowercase).
+
+    Section detection goes through writer.opens_section so the reader and the
+    writer cannot disagree about what a heading is; see AGENTS.md.
+    """
+    return opens_section(line) and line.strip().lower() == heading
+
+
+def is_section_end(line: str, heading: str) -> bool:
+    """Whether `line` closes the section that `heading` opened.
+
+    The same predicate as the start, bounded to the section's own level: a
+    sibling or shallower heading ends it, a deeper one the vault owner wrote
+    ('### Context' under '## Summary') is nested inside and stays indexed.
+    """
+    return opens_section(line, max_level=heading_level(heading))
+
+
 def _strip_wikilink(s: str) -> str:
     m = _WIKILINK_RE.search(s)
     return m.group(1).strip() if m else s.strip()
 
 
 def _extract_transcript(body: str) -> str:
-    """Pull the transcript text out of the '## Transcript' callout block."""
+    """Pull the transcript text out of the '## Transcript' callout block.
+
+    The section is the heading, an optional run of blank lines, and then the
+    contiguous run of '>' lines that is the callout — the same grammar the
+    writer emits and the timestamp backfill rewrites. Reading past the end of
+    that run would fold a callout the vault owner appended below the transcript
+    into transcript_text, publishing it in the dashboard and the RAG corpus.
+    An interior blank transcript line is written as '> ', so it stays inside.
+    """
     lines = body.splitlines()
+    start = next(
+        (i for i, ln in enumerate(lines) if is_section_start(ln, "## transcript")),
+        None,
+    )
+    if start is None:
+        return ""
+    i = start + 1
+    while i < len(lines) and not lines[i].strip():
+        i += 1
     out: list[str] = []
-    in_section = False
-    for ln in lines:
-        if ln.strip().lower() == "## transcript":
-            in_section = True
+    while i < len(lines) and lines[i].startswith(">"):
+        ln = lines[i]
+        i += 1
+        # skip the "[!note]- ..." callout header line
+        if ln.lstrip(">").strip().startswith("[!"):
             continue
-        if in_section:
-            if ln.startswith(">"):
-                # strip callout marker; skip the "[!note]- ..." header line
-                stripped = ln.lstrip(">").strip()
-                if stripped.startswith("[!"):
-                    continue
-                out.append(ln.lstrip(">")[1:] if ln.startswith("> ") else ln.lstrip(">"))
-            elif ln.strip() == "":
-                out.append("")
-            else:
-                break
+        out.append(ln.lstrip(">")[1:] if ln.startswith("> ") else ln.lstrip(">"))
     return "\n".join(out).strip()
 
 
 def _extract_summary(body: str) -> str:
+    """Body text under '## Summary', up to the next section at that level.
+
+    Both boundaries go through the same heading predicate, so they cannot
+    disagree about the same line (see AGENTS.md: add call sites, not second
+    definitions).
+    """
     lines = body.splitlines()
     out: list[str] = []
     in_section = False
     for ln in lines:
-        if ln.strip().lower() == "## summary":
+        if is_section_start(ln, "## summary"):
             in_section = True
             continue
         if in_section:
-            if ln.startswith("## "):
+            if is_section_end(ln, "## summary"):
                 break
             out.append(ln)
     return "\n".join(out).strip()
@@ -78,16 +116,18 @@ def _extract_summary(body: str) -> str:
 
 def _extract_action_items(body: str) -> list[tuple[str, bool]]:
     """(text, done) pairs from the '## Action Items' checkbox list. The note
-    is the source of truth: ticking a box in Obsidian closes the commitment."""
+    is the source of truth: ticking a box in Obsidian closes the commitment,
+    and a commitment the owner filed under their own '### …' sub-heading is
+    still one of theirs. The section ends as `is_section_end` says, as above."""
     lines = body.splitlines()
     out: list[tuple[str, bool]] = []
     in_section = False
     for ln in lines:
-        if ln.strip().lower() == "## action items":
+        if is_section_start(ln, "## action items"):
             in_section = True
             continue
         if in_section:
-            if ln.startswith("## "):
+            if is_section_end(ln, "## action items"):
                 break
             m = _CHECKBOX_RE.match(ln)
             if m:
@@ -109,10 +149,23 @@ def _parse_attendees(meta: dict) -> list[Attendee]:
 
 
 def parse_note(path: Path) -> Optional[NoteRecord]:
+    """Parse one vault note into a record, or None if it is not indexable.
+
+    Fails soft, and loudly: reindex_all walks every note in a bare loop, so one
+    hand-edited note — unloadable frontmatter, or a field whose shape surprises
+    us (`people: 42`) — must cost that note alone, not the whole vault index.
+    The note still disappears from the index until it is fixed, so the reason is
+    logged rather than swallowed.
+    """
     try:
-        post = frontmatter.load(str(path))
+        return _parse_note(path)
     except Exception:  # noqa: BLE001
+        _log.warning("skipping unparseable note: %s", path, exc_info=True)
         return None
+
+
+def _parse_note(path: Path) -> Optional[NoteRecord]:
+    post = frontmatter.load(str(path))
     meta = post.metadata
     tid = meta.get("transcript_id")
     if not tid or meta.get("synth"):
@@ -132,10 +185,19 @@ def parse_note(path: Path) -> Optional[NoteRecord]:
         action_items = fm_action_items
         open_items = fm_action_items
 
+    summary = _extract_summary(post.content)
+    headline = clean_headline(str(meta.get("headline") or ""))
+    if not headline:
+        # Legacy notes: prefer H1 with date stripped, else first summary sentence.
+        headline = clean_headline(_extract_h1(post.content)) or headline_from_summary(
+            summary, fallback=path.stem
+        )
+    display_title = _display_title(headline, date_str)
+
     return NoteRecord(
         transcript_id=str(tid),
         source=str(meta.get("source", "unknown")),
-        title=path.stem,
+        title=display_title,
         date=date_str,
         category="",  # categories are tracked separately (note_categories), not in note frontmatter
         people=people,
@@ -143,10 +205,30 @@ def parse_note(path: Path) -> Optional[NoteRecord]:
         action_items=action_items,
         open_action_items=open_items,
         attendees=_parse_attendees(meta),
-        summary=_extract_summary(post.content),
+        summary=summary,
         note_path=str(path.resolve()),
         transcript_text=_extract_transcript(post.content),
     )
+
+
+def _display_title(headline: str, date_str: str) -> str:
+    """Compose "{headline}, July 26th, 2026", tolerating a junk `date:`.
+
+    A note with a missing or malformed date must still index: parse_note is
+    called in a bare loop by reindex_all, so raising here would take the whole
+    vault index down over one bad note.
+    """
+    try:
+        return compose_display_title(headline, date_str) if date_str else headline
+    except ValueError:
+        return headline
+
+
+def _extract_h1(body: str) -> str:
+    for ln in body.splitlines():
+        if ln.startswith("# "):
+            return ln[2:].strip()
+    return ""
 
 
 def _iter_note_paths(cfg: Config):

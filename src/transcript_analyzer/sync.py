@@ -9,14 +9,17 @@ own daily cadence guard.
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Iterable, Optional
 
 from .config import Config, load_config
 from .connectors import pocket
 from .db import (
+    canonical_note_path,
     get_conn,
     get_meta,
     get_sync_hash,
@@ -30,8 +33,15 @@ from .pipeline.indexer import index_note
 from .pipeline.insights import extract_insight
 from .pipeline.llm import LLM, LLMBudgetError, LLMKillSwitchError
 from .pipeline.quality import junk_reason
+from .titles import compose_display_title
+
+_log = logging.getLogger(__name__)
 
 FAILURE_COUNTER_KEY = "insight_failures_total"
+
+# Marks a sync_state row whose note is written but whose recording still has to
+# be fetched, so the stored hash cannot match and the next pass reprocesses it.
+AUDIO_RETRY_HASH_SUFFIX = ":audio-retry"
 
 
 def _high_water_key(source: str) -> str:
@@ -73,20 +83,76 @@ def _limited(it: Iterable[Transcript], limit: Optional[int]) -> Iterable[Transcr
         yield x
 
 
-def _maybe_download_audio(cfg: Config, transcript: Transcript, insight) -> Optional[str]:
-    """Download a Pocket recording's audio into the vault. Returns the filename to embed."""
-    if transcript.source != "pocket" or not cfg.pocket.download_audio:
-        return None
-    from .connectors.pocket_api import PocketClient  # lazy (needs key)
+def _maybe_download_audio(
+    cfg: Config, transcript: Transcript, note_path: Path
+) -> tuple[Optional[str], bool]:
+    """Download a Pocket recording's audio into the vault.
 
-    prospective = writer.note_path_for(cfg, transcript, insight)
-    dest = writer.audio_path_for(cfg, prospective)
+    Returns (filename to embed, still owed). Audio is best effort, so an
+    unavailable recording or a failed fetch is simply no embed — but a
+    download DISCARDED because its stem was taken mid-stream is work this
+    transcript still owes, and saying so is what stops the hash-idempotent
+    sync from remembering it as done and never fetching it again.
+    """
+    if transcript.source != "pocket" or not cfg.pocket.download_audio:
+        return None, False
+    from .connectors.pocket_api import AudioStemTaken, PocketClient  # lazy (needs key)
+
+    dest = writer.audio_path_for(cfg, note_path)
     try:
         with PocketClient(cfg) as pc:
-            got = pc.download_audio(transcript.native_id, dest)
+            got = pc.download_audio(transcript.native_id, dest, transcript.id)
+    except AudioStemTaken:
+        return None, True
     except Exception:  # noqa: BLE001 - audio is best-effort, never fail the note
+        return None, False
+    return (dest.name if got else None), False
+
+
+def _owned_prev_note(prev_path: Optional[str], transcript: Transcript) -> Optional[Path]:
+    """The note sync_state remembers for this transcript, only when it is OURS.
+
+    sync_state stores a path, not a claim on the file living there: the vault
+    owner can delete a note and a later transcript whose headline slugifies the
+    same way then legitimately takes that filename. Acting on the remembered
+    path alone moves that stranger's recording and deletes their note. So the
+    same proof the write and rename targets require — `writer.owns_note`, the
+    one definition — gates the destructive paths here, and a path we cannot
+    prove is ours is left alone and named in a warning: an orphan costs a
+    manual cleanup, a wrong delete costs data this vault cannot recover.
+    """
+    if not prev_path:
         return None
-    return dest.name if got else None
+    prev = Path(prev_path)
+    if writer.owns_note(prev, transcript.id):
+        return prev
+    if prev.exists():
+        _log.warning(
+            "not touching %s: sync_state records it for %s/%s, but its "
+            "transcript_id does not prove it is that transcript's note "
+            "(it may now belong to another recording, or to you)",
+            prev, transcript.source, transcript.native_id,
+        )
+    return None
+
+
+def _is_stale_note(prev: Path, note_path: Path, transcript_id: str) -> bool:
+    """Whether `prev` is our own note AND provably a DIFFERENT file from the
+    note just written.
+
+    The vault has no backup, so this fails safe twice over: a file we cannot
+    prove belongs to this transcript is never deleted, and neither is a path
+    that cannot be shown to be another file — a relative or symlinked vault
+    path spelling the same note two ways, or a path that cannot be stat'ed.
+    """
+    if not writer.owns_note(prev, transcript_id):
+        return False
+    try:
+        if not prev.exists() or prev.samefile(note_path):
+            return False
+    except OSError:
+        return False
+    return True
 
 
 def _count_failure(cfg: Config) -> int:
@@ -106,9 +172,12 @@ def process_transcript(
     dry_run: bool = False,
 ) -> dict:
     insight = extract_insight(transcript, cfg, llm=llm)
+    display = compose_display_title(
+        insight.headline or transcript.title, transcript.date
+    )
     result = {
         "id": transcript.id,
-        "title": transcript.title,
+        "title": display,
         "source": transcript.source,
         "note_path": None,
     }
@@ -120,24 +189,41 @@ def process_transcript(
     with get_conn(cfg.db_path) as conn:
         prev_path = get_sync_note_path(conn, transcript.source, transcript.native_id)
 
-    # Download the recording's audio into the vault (Pocket only) and embed it.
-    audio_name = _maybe_download_audio(cfg, transcript, insight)
+    # A re-worded headline renames the note; carry its recording across first,
+    # so the download below finds the file the vault already has.
+    prev_note = _owned_prev_note(prev_path, transcript)
+    prospective = writer.note_path_for(cfg, transcript, insight)
+    if prev_note and canonical_note_path(prev_note) != canonical_note_path(prospective):
+        writer.move_audio_with_note(cfg, prev_note, prospective, transcript.id)
 
-    note_path = writer.write_note(cfg, transcript, insight, audio_name=audio_name)
+    # Download the recording's audio into the vault (Pocket only) and embed it.
+    audio_name, audio_still_owed = _maybe_download_audio(cfg, transcript, prospective)
+
+    # The claim above is the ONE decision: the download wrote the mp3 against
+    # it and the body embeds that name, so the note has to land on it too.
+    note_path = writer.write_note(
+        cfg, transcript, insight, audio_name=audio_name, path=prospective
+    )
     result["note_path"] = str(note_path)
 
-    if prev_path and prev_path != str(note_path) and os.path.exists(prev_path):
+    if prev_note and _is_stale_note(prev_note, note_path, transcript.id):
         try:
-            os.remove(prev_path)
+            os.remove(prev_note)
         except OSError:
             pass
 
     # Index the note we just wrote (parses it back -> sqlite).
     index_note(cfg, note_path)
+    # Recording the transcript's own hash is what makes the next pass skip it,
+    # so a discarded recording is stored under a hash that cannot match: the
+    # note is complete, but the audio is still owed and has to be re-fetched.
+    synced_hash = (
+        transcript.hash + AUDIO_RETRY_HASH_SUFFIX if audio_still_owed else transcript.hash
+    )
     with get_conn(cfg.db_path) as conn:
         record_sync(
             conn, transcript.source, transcript.native_id,
-            transcript.hash, str(note_path), _now(),
+            synced_hash, canonical_note_path(note_path), _now(),
         )
     return result
 

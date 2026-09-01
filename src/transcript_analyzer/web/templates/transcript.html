@@ -11,9 +11,15 @@
 </div>
 
 {% if has_audio %}
-<section>
-  <audio controls preload="none" style="width:100%" src="/audio/{{ rec.transcript_id }}"></audio>
+<section class="audio-section">
+  <audio id="player" controls preload="metadata" style="width:100%"
+         src="/audio/{{ rec.transcript_id }}"></audio>
+  {% if has_timestamps %}
+    <p class="muted small">Click a timestamp in the transcript to jump to that moment.</p>
+  {% endif %}
 </section>
+{% elif has_timestamps %}
+<p class="muted small">Timestamps are shown below. Audio seek works for Pocket recordings with a downloaded file.</p>
 {% endif %}
 
 {% if rec.people %}
@@ -47,9 +53,74 @@
 
 <section>
   <h2>Transcript</h2>
-  <details>
+  <details open>
     <summary>Show full transcript</summary>
-    <pre class="transcript">{{ rec.transcript_text }}</pre>
+    {% if transcript_lines %}
+      <div class="transcript timed-transcript" id="timed-transcript">
+        {% for row in transcript_lines %}
+          {% if not row.text and row.start_sec is none %}
+            <div class="t-line t-blank">&nbsp;</div>
+          {% elif row.start_sec is not none %}
+            <div class="t-line">
+              {% if has_audio %}
+                <button type="button" class="t-ts" data-t="{{ row.start_sec }}"
+                        title="Jump to this moment">{{ row.ts_label }}</button>
+              {% else %}
+                <span class="t-ts static">{{ row.ts_label }}</span>
+              {% endif %}
+              <span class="t-text">{{ row.text }}</span>
+            </div>
+          {% else %}
+            <div class="t-line t-untimed"><span class="t-text">{{ row.text }}</span></div>
+          {% endif %}
+        {% endfor %}
+      </div>
+    {% else %}
+      <pre class="transcript">{{ rec.transcript_text }}</pre>
+    {% endif %}
   </details>
 </section>
+{% endblock %}
+
+{% block scripts %}
+{% if has_audio and has_timestamps %}
+<script>
+(function () {
+  const player = document.getElementById('player');
+  const root = document.getElementById('timed-transcript');
+  if (!player || !root) return;
+
+  root.querySelectorAll('.t-ts[data-t]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const t = parseFloat(btn.dataset.t);
+      if (Number.isNaN(t)) return;
+      const seek = () => {
+        try { player.currentTime = t; } catch (_) {}
+        player.play().catch(() => {});
+        root.querySelectorAll('.t-line.active').forEach(el => el.classList.remove('active'));
+        btn.closest('.t-line')?.classList.add('active');
+      };
+      if (player.readyState >= 1) seek();
+      else player.addEventListener('loadedmetadata', seek, { once: true });
+    });
+  });
+
+  const lines = Array.from(root.querySelectorAll('.t-ts[data-t]')).map(btn => ({
+    sec: parseFloat(btn.dataset.t),
+    line: btn.closest('.t-line'),
+  })).filter(x => !Number.isNaN(x.sec));
+
+  player.addEventListener('timeupdate', () => {
+    const t = player.currentTime;
+    let current = null;
+    for (const row of lines) {
+      if (row.sec <= t + 0.25) current = row;
+      else break;
+    }
+    root.querySelectorAll('.t-line.active').forEach(el => el.classList.remove('active'));
+    if (current) current.line.classList.add('active');
+  });
+})();
+</script>
+{% endif %}
 {% endblock %}

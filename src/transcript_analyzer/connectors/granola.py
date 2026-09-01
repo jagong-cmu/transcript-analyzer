@@ -34,6 +34,16 @@ def _parse_date(val) -> date:
         return date.today()
 
 
+def _seg_timing(seg: dict, primary: str, fallback: str):
+    """Read a segment timing field by presence, not truthiness.
+
+    A numeric 0 is a real t=0 — reading it as absent dropped the [0:00] prefix
+    from the opening line of every numerically-timed note.
+    """
+    value = seg.get(primary)
+    return value if value is not None else seg.get(fallback)
+
+
 class GranolaClient:
     def __init__(self, cfg: Config) -> None:
         if not cfg.granola.enabled:
@@ -172,35 +182,56 @@ class GranolaClient:
             return other
         return ""
 
-    @staticmethod
-    def _transcript_text(detail: dict) -> str:
-        segments = detail.get("transcript") or []
-        owner, other = GranolaClient._channel_labels(detail)
-        lines: list[str] = []
-        prev = None
-        for seg in segments:
-            if not isinstance(seg, dict):
-                continue
+    @classmethod
+    def _transcript_segments(cls, detail: dict) -> list:
+        from ..models import TranscriptSegment
+        from ..transcript_fmt import coerce_seconds_series, relative_seconds_from_iso
+
+        # Every segment dict, empty ones included: a leading silent segment
+        # still marks t=0 for the ISO → relative conversion below.
+        raw = [seg for seg in (detail.get("transcript") or []) if isinstance(seg, dict)]
+        owner, other = cls._channel_labels(detail)
+        starts = [_seg_timing(seg, "start_time", "start") for seg in raw]
+        ends = [_seg_timing(seg, "end_time", "end") for seg in raw]
+        # Prefer ISO wall-clock → relative; else numeric start fields, whose
+        # unit is resolved once across the note rather than per value.
+        rel = relative_seconds_from_iso(
+            [s if isinstance(s, str) else None for s in starts]
+        )
+        timings = coerce_seconds_series(starts + ends)
+        num_starts, num_ends = timings[: len(raw)], timings[len(raw):]
+
+        segments: list[TranscriptSegment] = []
+        for i, seg in enumerate(raw):
             text = (seg.get("text") or "").strip()
             if not text:
                 continue
-            label = GranolaClient._seg_label(seg, owner, other)
-            if label and label != prev:
-                lines.append(f"{label}: {text}")
-                prev = label
-            else:
-                lines.append(text)
-        text = "\n".join(lines).strip()
-        if not text:
-            # No spoken transcript available — fall back to Granola's own summary.
-            text = (detail.get("summary_markdown") or detail.get("summary_text") or "").strip()
-        return text
+            segments.append(
+                TranscriptSegment(
+                    text=text,
+                    speaker=cls._seg_label(seg, owner, other),
+                    start_sec=rel[i] if rel[i] is not None else num_starts[i],
+                    end_sec=num_ends[i],
+                )
+            )
+        return segments
+
+    @classmethod
+    def _transcript_text(cls, detail: dict) -> tuple[str, list]:
+        from ..transcript_fmt import format_segments
+
+        segments = cls._transcript_segments(detail)
+        if segments:
+            return format_segments(segments), segments
+        # No spoken transcript available — fall back to Granola's own summary.
+        text = (detail.get("summary_markdown") or detail.get("summary_text") or "").strip()
+        return text, []
 
     def to_transcript(self, detail: dict) -> Optional[Transcript]:
         note_id = detail.get("id")
         if not note_id:
             return None
-        text = self._transcript_text(detail)
+        text, segments = self._transcript_text(detail)
         if not text:
             return None
         created = detail.get("created_at") or detail.get("updated_at")
@@ -213,6 +244,7 @@ class GranolaClient:
             participants=self._participants(detail),
             attendees=self._attendees(detail),
             text=text,
+            segments=segments,
             source_ref=detail.get("web_url") or str(note_id),
             remote_sort_key=str(created or ""),
         )

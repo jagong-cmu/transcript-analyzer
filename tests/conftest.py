@@ -1,3 +1,5 @@
+import importlib
+import sys
 from datetime import date
 from pathlib import Path
 
@@ -74,3 +76,34 @@ def make_transcript(title: str = "Team sync", text: str = "x" * 1000) -> Transcr
         date=date(2026, 7, 1),
         text=text,
     )
+
+
+APP_MODULE = "transcript_analyzer.web.app"
+
+
+@pytest.fixture
+def app_mod(cfg, monkeypatch):
+    """The dashboard bound to the tmp-vault `cfg` above — vault AND database.
+
+    web/app.py resolves its config once, at module scope, so the module is
+    dropped from sys.modules and re-imported per test. Pointing
+    TRANSCRIPT_ANALYZER_CONFIG at a scratch toml is not enough on its own:
+    Config.data_dir is a dataclass default (REPO_ROOT/"data") that no toml key
+    can move, so a config loaded from a file still binds — and creates — the
+    developer's real index.db. The isolation therefore comes from handing the
+    module the Config object itself.
+    """
+    from transcript_analyzer import config as config_module
+
+    real_load_config = config_module.load_config
+    real_load_config.cache_clear()
+    monkeypatch.setattr(config_module, "load_config", lambda: cfg)
+
+    sys.modules.pop(APP_MODULE, None)
+    app_module = importlib.import_module(APP_MODULE)
+    assert app_module.cfg is cfg, "the dashboard did not bind the scratch config"
+
+    yield app_module
+
+    sys.modules.pop(APP_MODULE, None)
+    real_load_config.cache_clear()

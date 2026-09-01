@@ -16,14 +16,20 @@
       <button type="button" id="cat-reset" class="btn-ghost">Clear all</button>
     {% endif %}
   </div>
-  <p class="muted small">Claude sorts every conversation into the labels you list,
-    then synthesizes a scoped briefing (themes + open threads) for each non-empty category.
-    Notes stay where they are — categories are a non-destructive overlay.</p>
-  <form id="cat-form" class="ask-form">
-    <input id="cat-input" name="categories" type="text" autocomplete="off"
-           value="{{ suggested_categories }}"
-           placeholder="e.g. Fundraising, Hiring, Product, Personal" required>
-    <button type="submit" class="btn">Categorize</button>
+  <p class="muted small">Add categories with a short description of what belongs in each.
+    Claude uses those descriptions to place conversations accurately, then synthesizes
+    a scoped briefing per folder. Notes stay date-organized.</p>
+  <form id="cat-form">
+    <div class="cat-def-head">
+      <span>Name</span>
+      <span>Description <span class="muted">(what belongs here)</span></span>
+      <span></span>
+    </div>
+    <div id="cat-rows" class="cat-rows"></div>
+    <div class="cat-def-actions">
+      <button type="button" id="cat-add" class="btn-ghost">+ Add category</button>
+      <button type="submit" class="btn">Categorize</button>
+    </div>
   </form>
   <p id="cat-status" class="synth-status muted" hidden></p>
 </section>
@@ -36,6 +42,9 @@
       <a class="card cat-card" href="/category/{{ name | urlencode }}">
         <div class="card-title">{{ name }}</div>
         <div class="card-count">{{ count }}</div>
+        {% if category_descriptions.get(name) %}
+          <p class="summary">{{ category_descriptions[name] }}</p>
+        {% endif %}
       </a>
     {% endfor %}
   </div>
@@ -75,10 +84,12 @@
 
 {% block scripts %}
 <script>
+const initialDefs = {{ category_defs | tojson }};
 const catForm = document.getElementById('cat-form');
-const catInput = document.getElementById('cat-input');
+const catRows = document.getElementById('cat-rows');
 const catStatus = document.getElementById('cat-status');
 const catReset = document.getElementById('cat-reset');
+const catAdd = document.getElementById('cat-add');
 const catBtn = catForm ? catForm.querySelector('button[type="submit"]') : null;
 
 function showStatus(msg, isError) {
@@ -87,18 +98,57 @@ function showStatus(msg, isError) {
   catStatus.classList.toggle('error', !!isError);
 }
 
+function addRow(name = '', description = '') {
+  const row = document.createElement('div');
+  row.className = 'cat-row';
+  row.innerHTML = `
+    <input class="cat-name" type="text" placeholder="e.g. Fundraising" value="" required>
+    <input class="cat-desc" type="text" placeholder="e.g. LP updates, term sheets, raise strategy" value="">
+    <button type="button" class="btn-ghost cat-remove" title="Remove">×</button>
+  `;
+  row.querySelector('.cat-name').value = name;
+  row.querySelector('.cat-desc').value = description;
+  row.querySelector('.cat-remove').addEventListener('click', () => {
+    if (catRows.children.length <= 1) {
+      row.querySelector('.cat-name').value = '';
+      row.querySelector('.cat-desc').value = '';
+      return;
+    }
+    row.remove();
+  });
+  catRows.appendChild(row);
+}
+
+function collectDefs() {
+  return Array.from(catRows.querySelectorAll('.cat-row')).map(row => ({
+    name: row.querySelector('.cat-name').value.trim(),
+    description: row.querySelector('.cat-desc').value.trim(),
+  })).filter(d => d.name);
+}
+
+if (initialDefs && initialDefs.length) {
+  initialDefs.forEach(d => addRow(d.name || '', d.description || ''));
+} else {
+  addRow();
+}
+
+if (catAdd) catAdd.addEventListener('click', () => addRow());
+
 if (catForm) {
   catForm.addEventListener('submit', async (e) => {
     e.preventDefault();
-    const cats = catInput.value.trim();
-    if (!cats) return;
+    const cats = collectDefs();
+    if (!cats.length) {
+      showStatus('Add at least one category name.', true);
+      return;
+    }
     catBtn.disabled = true;
-    showStatus('Categorizing all conversations… this can take a minute.', false);
+    showStatus('Categorizing with your descriptions… this can take a minute.', false);
     try {
       const resp = await fetch('/categorize', {
         method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        body: new URLSearchParams({categories: cats}),
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({categories: cats}),
       });
       const data = await resp.json();
       if (!resp.ok || !data.ok) {
@@ -112,7 +162,8 @@ if (catForm) {
         `Assigned ${s.assigned}/${s.total} (${s.unassigned} left). Wrote ${nRollups} category briefing(s). Reloading…`,
         false
       );
-      location.reload();    } catch (err) {
+      location.reload();
+    } catch (err) {
       showStatus(String(err), true);
       catBtn.disabled = false;
     }
@@ -121,7 +172,7 @@ if (catForm) {
 
 if (catReset) {
   catReset.addEventListener('click', async () => {
-    if (!confirm('Clear all category assignments and index notes?')) return;
+    if (!confirm('Clear all category assignments, descriptions, and index notes?')) return;
     catReset.disabled = true;
     showStatus('Clearing categories…', false);
     try {

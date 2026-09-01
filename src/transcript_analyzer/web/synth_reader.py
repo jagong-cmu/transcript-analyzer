@@ -81,6 +81,7 @@ class CategoryInsight:
     name: str
     path: Path
     overview: str = ""
+    scope: str = ""
     themes: list[Claim] = field(default_factory=list)
     open_threads: list[Claim] = field(default_factory=list)
     open_commitments: list[Claim] = field(default_factory=list)
@@ -391,6 +392,7 @@ def parse_category(body: str, by_stem: dict[str, NoteRecord]) -> CategoryInsight
     threads: list[Claim] = []
     commitments: list[Claim] = []
     convos: list[Claim] = []
+    scope = ""
     section = ""
     for ln in body.splitlines():
         hm = HEADING_RE.match(ln)
@@ -399,6 +401,9 @@ def parse_category(body: str, by_stem: dict[str, NoteRecord]) -> CategoryInsight
             continue
         if not section and ln.startswith("**") and "·" in ln:
             continue  # skip "**Fundraising** · N conversation(s)" title line
+        if not section and ln.startswith("_Scope:"):
+            scope = ln.strip().strip("_").removeprefix("Scope:").strip()
+            continue
         bm = BULLET_RE.match(ln)
         if bm:
             claim = resolve_claim(bm.group(1), by_stem)
@@ -417,6 +422,7 @@ def parse_category(body: str, by_stem: dict[str, NoteRecord]) -> CategoryInsight
         name="",
         path=Path(),
         overview=" ".join(overview_lines).strip(),
+        scope=scope,
         themes=themes,
         open_threads=threads,
         open_commitments=commitments,

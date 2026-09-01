@@ -8,6 +8,9 @@
     {{ items | length }} conversation{{ 's' if items | length != 1 else '' }} in this category.
     {% if obsidian_url %}· <a href="{{ obsidian_url }}">Open in Obsidian ↗</a>{% endif %}
   </p>
+  {% if category_description %}
+    <p class="category-scope">{{ category_description }}</p>
+  {% endif %}
 </div>
 
 {% if insight.exists and (insight.overview or insight.themes or insight.open_threads) %}

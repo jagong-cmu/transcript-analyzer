@@ -13,6 +13,7 @@ from typing import Optional
 
 from ..config import Config
 from ..models import Insight, Transcript
+from ..titles import clean_headline, headline_from_summary
 from .llm import LLM
 
 # Cost sanity cap, not a context-window limit (the 1M window fits any
@@ -22,6 +23,14 @@ _MAX_CHARS = 100_000
 INSIGHT_SCHEMA = {
     "type": "object",
     "properties": {
+        "title": {
+            "type": "string",
+            "description": (
+                "A short, specific one-line title for this conversation "
+                "(5–12 words). No date. Prefer concrete topics and people "
+                "over generic labels like 'Meeting' or 'Sync'."
+            ),
+        },
         "summary": {"type": "string"},
         "key_points": {"type": "array", "items": {"type": "string"}},
         "action_items": {"type": "array", "items": {"type": "string"}},
@@ -29,7 +38,15 @@ INSIGHT_SCHEMA = {
         "topics": {"type": "array", "items": {"type": "string"}},
         "sentiment": {"type": "string", "enum": ["positive", "neutral", "negative", "mixed"]},
     },
-    "required": ["summary", "key_points", "action_items", "people", "topics", "sentiment"],
+    "required": [
+        "title",
+        "summary",
+        "key_points",
+        "action_items",
+        "people",
+        "topics",
+        "sentiment",
+    ],
 }
 
 SYSTEM = """You are an assistant that reads a meeting or conversation transcript and
@@ -37,6 +54,9 @@ extracts a concise, structured summary. Be faithful to the transcript; do not in
 
 USER_TEMPLATE = """Analyze the following transcript and return a JSON object with EXACTLY these keys:
 
+- "title": string. A short, specific one-line title for the conversation (5–12 words).
+  No date in the title. Name the topic and, when clear, the main person or purpose.
+  Bad: "Meeting", "Sync", "Untitled". Good: "Pricing deck review with Angela".
 - "summary": string. 2-4 sentence overview of what the conversation was about.
 - "key_points": array of strings. The most important points, decisions, or takeaways (3-8 items).
 - "action_items": array of strings. Concrete follow-ups or todos mentioned (may be empty).
@@ -71,9 +91,14 @@ def extract_insight(
     )
 
     data = llm.chat_json(SYSTEM, user, schema=INSIGHT_SCHEMA)
+    summary = _as_str(data.get("summary"))
+    headline = clean_headline(_as_str(data.get("title")))
+    if not headline:
+        headline = headline_from_summary(summary, fallback=transcript.title)
 
     return Insight(
-        summary=_as_str(data.get("summary")),
+        headline=headline,
+        summary=summary,
         key_points=_as_list(data.get("key_points")),
         action_items=_as_list(data.get("action_items")),
         people=_as_list(data.get("people")) or list(transcript.participants),

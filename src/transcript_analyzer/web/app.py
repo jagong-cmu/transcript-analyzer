@@ -10,6 +10,7 @@ from fastapi import FastAPI, Form, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.concurrency import run_in_threadpool
 
 from .. import rag
 from ..config import load_config
@@ -99,6 +100,11 @@ def browse(request: Request):
         by_month[month].append(rec)
     timeline = sorted(by_month.items(), key=lambda kv: kv[0], reverse=True)
 
+    defs = organize.load_category_definitions(cfg)
+    if not defs and cats:
+        defs = [organize.CategoryDef(name) for name, _ in cats]
+    desc_by_name = {d.name: d.description for d in defs}
+
     return templates.TemplateResponse(
         request,
         "browse.html",
@@ -107,9 +113,59 @@ def browse(request: Request):
             "timeline": timeline,
             "action_items": action_items[:25],
             "total": len(records),
-            "suggested_categories": ", ".join(name for name, _ in cats),
+            "category_defs": [{"name": d.name, "description": d.description} for d in defs],
+            "category_descriptions": desc_by_name,
         },
     )
+
+
+@app.post("/categorize")
+async def categorize_now(request: Request):
+    """Run Claude categorization. Accepts JSON body
+    {"categories":[{"name":"...","description":"..."}]} or form field
+    categories."""
+    defs: list = []
+    content_type = (request.headers.get("content-type") or "").lower()
+    if "application/json" in content_type:
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            return JSONResponse(
+                {"ok": False, "error": "Invalid JSON body."}, status_code=400
+            )
+        if not isinstance(body, dict):
+            return JSONResponse(
+                {"ok": False, "error": "JSON body must be an object."}, status_code=400
+            )
+        cats = body.get("categories") or []
+        if not isinstance(cats, list):
+            return JSONResponse(
+                {"ok": False, "error": "'categories' must be a list."}, status_code=400
+            )
+        defs = organize.normalize_categories(cats)
+    else:
+        form = await request.form()
+        raw = str(form.get("categories") or "").strip()
+        if raw:
+            defs = organize.normalize_categories(_parse_categories(raw))
+
+    if not defs:
+        return JSONResponse(
+            {"ok": False, "error": "Provide at least one category with a name."},
+            status_code=400,
+        )
+    try:
+        # organize.categorize is fully synchronous and spends one blocking
+        # Anthropic call per note; on the event loop it would freeze every
+        # other request (including this page's own status poll) for minutes.
+        summary = await run_in_threadpool(
+            organize.categorize, cfg, categories=defs, verbose=False
+        )
+    except LLMError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=502)
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+    return JSONResponse({"ok": True, "summary": summary})
 
 
 def _parse_categories(raw: str) -> list[str]:
@@ -117,24 +173,6 @@ def _parse_categories(raw: str) -> list[str]:
     if "," in raw:
         return [c.strip() for c in raw.split(",") if c.strip()]
     return [c for c in raw.split() if c]
-
-
-@app.post("/categorize")
-def categorize_now(categories: str = Form(...)):
-    """Run Claude categorization across all notes into the given labels.
-    Notes stay date-organized; this rewrites the Categories/ overlay + DB."""
-    cats = _parse_categories(categories)
-    if not cats:
-        return JSONResponse(
-            {"ok": False, "error": "Provide at least one category."}, status_code=400
-        )
-    try:
-        summary = organize.categorize(cfg, categories=cats, verbose=False)
-    except LLMError as e:
-        return JSONResponse({"ok": False, "error": str(e)}, status_code=502)
-    except Exception as e:  # noqa: BLE001
-        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
-    return JSONResponse({"ok": True, "summary": summary})
 
 
 @app.post("/categorize/reset")
@@ -297,6 +335,8 @@ def category(request: Request, name: str):
     insight = synth_reader.load_category_insight(
         cfg, name, synth_reader.stem_index(records)
     )
+    defs = {d.name: d.description for d in organize.load_category_definitions(cfg)}
+    description = defs.get(name, "") or insight.scope
     return templates.TemplateResponse(
         request,
         "category.html",
@@ -305,6 +345,7 @@ def category(request: Request, name: str):
             "items": items,
             "categories": cats,
             "insight": insight,
+            "category_description": description,
             "obsidian_url": obsidian_uri(str(insight.path)) if insight.exists else "",
         },
     )
@@ -312,6 +353,8 @@ def category(request: Request, name: str):
 
 @app.get("/transcript/{tid}", response_class=HTMLResponse)
 def transcript(request: Request, tid: str):
+    from ..transcript_fmt import parse_transcript_lines
+
     with get_conn(cfg.db_path) as conn:
         rec = get_transcript(conn, tid)
         cats = category_counts(conn)
@@ -321,6 +364,8 @@ def transcript(request: Request, tid: str):
     has_audio = (
         writer.audio_path_for(cfg, Path(rec.note_path)).exists() if rec.note_path else False
     )
+    transcript_lines = parse_transcript_lines(rec.transcript_text)
+    has_timestamps = any(row["start_sec"] is not None for row in transcript_lines)
     return templates.TemplateResponse(
         request,
         "transcript.html",
@@ -330,6 +375,8 @@ def transcript(request: Request, tid: str):
             "note_categories": note_cats,
             "obsidian_url": obsidian_uri(rec.note_path),
             "has_audio": has_audio,
+            "transcript_lines": transcript_lines,
+            "has_timestamps": has_timestamps,
         },
     )
 

@@ -11,6 +11,7 @@ Preferred over the vault-folder connector when an API key is configured.
 """
 from __future__ import annotations
 
+import logging
 import re
 from datetime import date, datetime
 from pathlib import Path
@@ -20,10 +21,22 @@ import httpx
 
 from ..config import Config
 from ..models import Transcript, stable_id
+from ..obsidian import writer
+
+_log = logging.getLogger(__name__)
 
 
 class PocketAuthError(RuntimeError):
     pass
+
+
+class AudioStemTaken(RuntimeError):
+    """A finished download was discarded: its stem now belongs to another note.
+
+    Distinct from an ordinary download failure because it is an expected
+    outcome with a known remedy — fetch it again once this transcript holds a
+    stem of its own — rather than a missing or unavailable recording.
+    """
 
 
 def _parse_date(val) -> date:
@@ -96,23 +109,47 @@ class PocketClient:
         d = data.get("data", data) if isinstance(data, dict) else {}
         return d.get("signed_url") if isinstance(d, dict) else None
 
-    def download_audio(self, rec_id: str, dest: "Path") -> Optional["Path"]:
-        """Download the recording's audio to `dest`. Returns the path, or None."""
+    def download_audio(
+        self, rec_id: str, dest: "Path", transcript_id: str
+    ) -> Optional["Path"]:
+        """Download the recording's audio to `dest`. Returns the path, or None.
+
+        The stem is claimed for the whole stream — `writer.audio_partial` is
+        what `claimable_stem` reads — and re-proven immediately before the
+        replace. A check made at the start cannot carry a multi-minute
+        download: a retitle pass or another sync can legitimately take that
+        stem meanwhile, and replacing then destroys THEIR recording in a vault
+        with no backup. Unproven means the finished file is discarded and
+        `AudioStemTaken` is raised, which the sync records as work still owed
+        so the next pass fetches it again under a stem this transcript owns.
+        """
         if dest.exists() and dest.stat().st_size > 0:
             return dest  # already downloaded
         url = self.audio_url(rec_id)
         if not url:
             return None
         dest.parent.mkdir(parents=True, exist_ok=True)
-        tmp = dest.with_suffix(dest.suffix + ".part")
+        tmp = writer.audio_partial(dest)
         try:
             with httpx.stream("GET", url, timeout=300, follow_redirects=True) as r:
                 r.raise_for_status()
                 with open(tmp, "wb") as f:
                     for chunk in r.iter_bytes(chunk_size=1 << 16):
                         f.write(chunk)
+            if not writer.claimable_stem(
+                writer.note_for_audio(dest), transcript_id, in_flight_download=True
+            ):
+                _log.warning(
+                    "discarding the recording downloaded for %s: %s was taken "
+                    "while it streamed and is not this transcript's to replace",
+                    rec_id, dest,
+                )
+                tmp.unlink(missing_ok=True)
+                raise AudioStemTaken(str(dest))
             tmp.replace(dest)
             return dest
+        except AudioStemTaken:
+            raise
         except Exception:  # noqa: BLE001
             tmp.unlink(missing_ok=True)
             return None
@@ -128,47 +165,76 @@ class PocketClient:
         return f"Speaker {int(m.group(1)) + 1}" if m else str(speaker).strip()
 
     @staticmethod
-    def _transcript_text(detail: dict) -> str:
+    def _iter_raw_segments(detail: dict):
+        """Yield segment dicts from either public-API or webhook transcript shapes."""
+        tr = detail.get("transcript")
+        if isinstance(tr, dict):
+            for seg in tr.get("segments") or []:
+                if isinstance(seg, dict):
+                    yield seg
+            return
+        if isinstance(tr, list):
+            for seg in tr:
+                if isinstance(seg, dict):
+                    yield seg
+
+    @classmethod
+    def _transcript_segments(cls, detail: dict) -> list:
+        from ..models import TranscriptSegment
+        from ..transcript_fmt import coerce_seconds_series
+
+        raw = list(cls._iter_raw_segments(detail))
+        # Resolve the timing unit once across the whole recording, not per value.
+        timings = coerce_seconds_series(
+            [seg.get("start") for seg in raw] + [seg.get("end") for seg in raw]
+        )
+        starts, ends = timings[: len(raw)], timings[len(raw):]
+
+        segments: list[TranscriptSegment] = []
+        for i, seg in enumerate(raw):
+            t = (seg.get("text") or "").strip()
+            if not t:
+                continue
+            segments.append(
+                TranscriptSegment(
+                    text=t,
+                    speaker=cls._speaker_label(seg.get("speaker")),
+                    start_sec=starts[i],
+                    end_sec=ends[i],
+                )
+            )
+        return segments
+
+    @classmethod
+    def _transcript_text(cls, detail: dict) -> tuple[str, list]:
+        from ..transcript_fmt import format_segments
+
+        segments = cls._transcript_segments(detail)
+        if segments:
+            return format_segments(segments), segments
+
         tr = detail.get("transcript") or {}
         if isinstance(tr, dict):
-            # Prefer diarized segments so each turn is attributed to a speaker.
-            lines: list[str] = []
-            prev = None
-            for seg in tr.get("segments") or []:
-                if not isinstance(seg, dict):
-                    continue
-                t = (seg.get("text") or "").strip()
-                if not t:
-                    continue
-                name = PocketClient._speaker_label(seg.get("speaker"))
-                if name and name != prev:
-                    lines.append(f"{name}: {t}")
-                    prev = name
-                else:
-                    lines.append(t)
-            if lines:
-                return "\n".join(lines)
-            # No diarization for this recording — fall back to flat text.
             flat = (tr.get("text") or "").strip()
             if flat:
-                return flat
+                return flat, []
         # Last resort: a Pocket summary.
         summ = detail.get("summarizations")
         if isinstance(summ, dict):
             for v in summ.values():
                 if isinstance(v, str) and v.strip():
-                    return v.strip()
+                    return v.strip(), []
                 if isinstance(v, dict):
                     for vv in v.values():
                         if isinstance(vv, str) and vv.strip():
-                            return vv.strip()
-        return ""
+                            return vv.strip(), []
+        return "", []
 
     def to_transcript(self, detail: dict) -> Optional[Transcript]:
         rec_id = detail.get("id")
         if not rec_id:
             return None
-        text = self._transcript_text(detail)
+        text, segments = self._transcript_text(detail)
         if not text:
             return None
         created = detail.get("recording_at") or detail.get("created_at")
@@ -182,6 +248,7 @@ class PocketClient:
             date=_parse_date(created),
             participants=[],
             text=text,
+            segments=segments,
             source_ref=str(rec_id),
             remote_sort_key=str(detail.get("created_at") or created or ""),
         )

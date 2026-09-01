@@ -36,6 +36,15 @@ class Attendee(BaseModel):
         return " ".join(self.name.lower().replace("_", " ").split())
 
 
+class TranscriptSegment(BaseModel):
+    """One timed utterance (or turn) from a source transcript."""
+
+    text: str
+    speaker: str = ""
+    start_sec: Optional[float] = None
+    end_sec: Optional[float] = None
+
+
 class Transcript(BaseModel):
     """A normalized transcript from any source."""
 
@@ -47,6 +56,9 @@ class Transcript(BaseModel):
     participants: list[str] = Field(default_factory=list)
     attendees: list[Attendee] = Field(default_factory=list)
     text: str
+    # Optional timed segments; when present, `text` is usually
+    # format_segments(segments). Kept for callers that only need the string.
+    segments: list[TranscriptSegment] = Field(default_factory=list)
     source_ref: str = ""  # granola doc id, or absolute vault file path
     remote_sort_key: str = ""  # e.g. Granola created_at ISO, for incremental high-water marks
 
@@ -58,6 +70,9 @@ class Transcript(BaseModel):
 class Insight(BaseModel):
     """LLM-extracted structured insight for a transcript."""
 
+    # Short one-liner describing the conversation (no date). Display title is
+    # composed as "{headline}, July 26th, 2026" at write/index time.
+    headline: str = ""
     summary: str = ""
     key_points: list[str] = Field(default_factory=list)
     action_items: list[str] = Field(default_factory=list)
