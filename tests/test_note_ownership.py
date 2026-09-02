@@ -332,3 +332,128 @@ def test_retitle_moves_only_the_sync_state_row_that_owns_the_note(cfg, monkeypat
     with get_conn(cfg.db_path) as conn:
         assert get_sync_note_path(conn, "granola", "MINE") == canonical_note_path(moved)
         assert get_sync_note_path(conn, "granola", "SOMEONE-ELSE") == canonical_note_path(old)
+
+
+def test_retitle_repoints_the_study_notes_own_links(cfg, monkeypatch):
+    """The study note names files by stem too, and nothing regenerates it.
+
+    `study_markdown` writes a link back to the recording's note and one to its
+    own PDF, both from the pre-rename stems. Retitle is a one-shot migration,
+    so if it does not repoint them they dangle for good.
+    """
+    from transcript_analyzer.render import study as study_render
+
+    monkeypatch.setattr(retitle_notes, "load_config", lambda: cfg)
+    old = cfg.vault.insights_path / "2026-07-01 raw-source-title.md"
+    old.write_text(NOTE_TO_RETITLE, encoding="utf-8")
+    old_study = writer.study_note_path_for(cfg, old)
+    study_md = study_render.study_markdown(
+        _study_notes(),
+        title="Pricing deck review",
+        when=date(2026, 7, 1),
+        transcript_stem=old.stem,
+        pdf_name=f"{old_study.stem}.pdf",
+    )
+    written = writer.write_study_note(cfg, old, "t1abcdef", study_md, title="Study")
+    writer.write_study_pdf(written, "t1abcdef", b"%PDF ours")
+
+    result = retitle_notes.retitle(cheap=True)
+
+    assert result["updated"] == 1 and result["errors"] == 0
+    moved = cfg.vault.insights_path / BASE_NAME
+    new_study = writer.study_note_path_for(cfg, moved)
+    assert new_study.exists() and not written.exists()
+
+    text = new_study.read_text(encoding="utf-8")
+    assert f"[[{moved.stem}|Recording and transcript]]" in text
+    assert f"[[{new_study.stem}.pdf|Printable PDF]]" in text
+    assert old.stem not in text, "a link to the pre-rename stem was left dangling"
+    assert writer.study_pdf_for(new_study).read_bytes() == b"%PDF ours"
+
+
+def _study_notes():
+    from transcript_analyzer.models import StudyNotes, StudySection
+
+    return StudyNotes(
+        overview="Angela reviews the deck.",
+        sections=[StudySection(heading="Pricing", body="The deck.", anchor="deck")],
+    )
+
+
+NEW_SHAPE_NOTE = """---
+source: granola
+date: 2026-07-01
+transcript_id: t1abcdef
+abstract: "Angela agreed to review the pricing deck by Friday."
+---
+
+# raw source title
+
+**Source:** granola  ·  **Date:** July 1st, 2026
+
+## Summary
+
+### Opening
+
+The class opened with a recap of last week.
+
+### The method
+
+Then the professor worked through the elimination steps.
+
+## Transcript
+> [!note]- Full transcript
+> Angela: I will review the deck.
+"""
+
+
+def test_retitle_never_slugifies_a_heading_into_a_filename(cfg, monkeypatch):
+    """The headline becomes a real FILENAME in a vault with no backup.
+
+    The body '## Summary' is the long structured summary now and the model is
+    asked to open it with '###', so deriving a headline from it produced
+    '### Opening The class opened with a recap of last week' — as the note's
+    headline, its H1, and the name of the file on disk. The bounded
+    `abstract:` is the field that is still one paragraph.
+    """
+    monkeypatch.setattr(retitle_notes, "load_config", lambda: cfg)
+    old = cfg.vault.insights_path / "2026-07-01 raw-source-title.md"
+    old.write_text(NEW_SHAPE_NOTE, encoding="utf-8")
+
+    result = retitle_notes.retitle(cheap=True)
+
+    assert result["updated"] == 1 and result["errors"] == 0
+    written = [p for p in cfg.vault.insights_path.glob("*.md")
+               if p.stem != cfg.vault.insights_folder]
+    assert len(written) == 1
+    moved = written[0]
+    assert "#" not in moved.stem and "opening" not in moved.stem.lower()
+
+    rec = indexer.parse_note(moved)
+    assert rec is not None and rec.transcript_id == "t1abcdef"
+    assert not rec.title.startswith("#")
+    assert "Angela agreed to review the pricing deck" in rec.title
+    # The long summary itself is untouched; only the headline source changed.
+    assert "elimination steps" in moved.read_text(encoding="utf-8")
+
+
+LEGACY_NO_ABSTRACT = NEW_SHAPE_NOTE.replace(
+    'abstract: "Angela agreed to review the pricing deck by Friday."\n', ""
+)
+
+
+def test_retitle_falls_back_to_the_body_summary_through_the_same_bound(cfg, monkeypatch):
+    """A note written before the split has no `abstract:` — and its body
+    summary must still not contribute a '###' to the filename."""
+    monkeypatch.setattr(retitle_notes, "load_config", lambda: cfg)
+    old = cfg.vault.insights_path / "2026-07-01 raw-source-title.md"
+    old.write_text(LEGACY_NO_ABSTRACT, encoding="utf-8")
+
+    result = retitle_notes.retitle(cheap=True)
+
+    assert result["updated"] == 1 and result["errors"] == 0
+    written = [p for p in cfg.vault.insights_path.glob("*.md")
+               if p.stem != cfg.vault.insights_folder]
+    moved = written[0]
+    assert "#" not in moved.stem
+    assert moved.stem.startswith("2026-07-01 the-class-opened")

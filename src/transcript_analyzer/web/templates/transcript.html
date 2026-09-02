@@ -28,9 +28,22 @@
 </p>
 {% endif %}
 
+{% if has_study_pdf or study_obsidian_url %}
+<section class="audio-section">
+  <strong>Study notes</strong> —
+  {% if has_study_pdf %}<a href="/study/{{ rec.transcript_id }}">Printable PDF ↓</a>{% endif %}
+  {% if has_study_pdf and study_obsidian_url %} · {% endif %}
+  {% if study_obsidian_url %}<a href="{{ study_obsidian_url }}">Open in Obsidian ↗</a>{% endif %}
+</section>
+{% endif %}
+
 <section>
   <h2>Summary</h2>
-  <p>{{ rec.summary or "No summary." }}</p>
+  {% if rec.detailed_summary %}
+    {{ rec.detailed_summary | summary }}
+  {% else %}
+    <p>{{ rec.summary or "No summary." }}</p>
+  {% endif %}
 </section>
 
 {% if rec.action_items %}

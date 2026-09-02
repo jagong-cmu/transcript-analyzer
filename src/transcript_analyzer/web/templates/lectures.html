@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Lectures · Transcript Analyzer{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Lectures</h1>
+  <p class="muted">{{ total }} lecture(s) with study notes.
+    <a href="/browse">← Browse everything</a>
+  </p>
+</div>
+
+{% if not courses %}
+  <p class="muted">No lectures yet. A recording becomes one when the extraction pass
+    classifies it as a lecture — study notes and a printable PDF are written then.</p>
+{% endif %}
+
+{% for course, items in courses %}
+<section class="panel">
+  <div class="panel-head"><h2>{{ course }}</h2></div>
+  <ul class="cat-list">
+    {% for item in items %}
+    <li>
+      <a href="/transcript/{{ item.rec.transcript_id }}">{{ item.rec.title }}</a>
+      {% if item.has_pdf %}
+        · <a href="/study/{{ item.rec.transcript_id }}">Study notes (PDF)</a>
+      {% else %}
+        · <span class="muted small">no PDF</span>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endfor %}
+{% endblock %}

@@ -49,6 +49,25 @@ class GranolaConfig:
         return bool(self.token.strip())
 
 
+# Per-stage model and effort defaults. A stage names a job, not a model, so
+# the expensive study-notes pass and the cheap bulk extraction can be retuned
+# (or repointed at a new model) without touching call sites. Empty string =
+# "use [anthropic] model" for a model, and "send no effort at all" for effort
+# — which is what pre-4.6 models require, since they reject the parameter.
+DEFAULT_STAGE_MODELS: dict[str, str] = {
+    "lecture": "claude-opus-5",   # study notes + diagram specs: the quality bet
+    "backfill": "claude-sonnet-5",  # bulk re-summarization of the whole vault
+}
+# Thinking is ON BY DEFAULT on Opus 5 and billed as output tokens, so the
+# stages that only fill in a schema are pinned low rather than paying for
+# reasoning they do not need.
+DEFAULT_STAGE_EFFORT: dict[str, str] = {
+    "extract": "low",
+    "backfill": "low",
+    "lecture": "medium",
+}
+
+
 @dataclass(frozen=True)
 class AnthropicConfig:
     """Claude API settings, including the hard cost guards.
@@ -67,6 +86,12 @@ class AnthropicConfig:
     # Hard cap on API calls in a single process run (one sync cycle, one
     # synthesis run, one dashboard process). Bounds runaway-loop damage.
     max_calls_per_run: int = 80
+    # Per-stage overrides; see DEFAULT_STAGE_MODELS / DEFAULT_STAGE_EFFORT.
+    stage_models: dict = field(default_factory=lambda: dict(DEFAULT_STAGE_MODELS))
+    stage_effort: dict = field(default_factory=lambda: dict(DEFAULT_STAGE_EFFORT))
+    # Output cap for the study-notes pass, which writes far more than a
+    # summary does. Streamed, so it is not bounded by the HTTP timeout.
+    lecture_max_tokens: int = 32000
 
 
 @dataclass(frozen=True)
@@ -120,6 +145,25 @@ class CalendarConfig:
 
 
 @dataclass(frozen=True)
+class LectureConfig:
+    """The lecture profile: study notes + a rendered PDF for recordings the
+    extraction pass classifies as `kind: lecture`.
+
+    Detection is the model's `kind` field alone — the captain declined a course
+    registry, so nothing here names a course.
+    """
+
+    enabled: bool = True
+    # Render the PDF. Needs the Playwright Chromium cache; when it is missing
+    # the markdown study note is still written and the PDF is skipped.
+    pdf: bool = True
+    # Diagram budget. Under the minimum the prompt is not satisfied, but a
+    # lecture that genuinely has nothing to draw still gets its notes.
+    min_visuals: int = 2
+    max_visuals: int = 5
+
+
+@dataclass(frozen=True)
 class SyncConfig:
     interval_seconds: int
 
@@ -141,6 +185,7 @@ class Config:
     calendar: CalendarConfig
     sync: SyncConfig
     web: WebConfig
+    lecture: LectureConfig = field(default_factory=LectureConfig)
     data_dir: Path = field(default=DATA_DIR)
 
     @property
@@ -165,6 +210,20 @@ def _config_file() -> Path:
     if real.exists():
         return real
     return REPO_ROOT / "config.example.toml"
+
+
+def _stage_overrides(defaults: dict[str, str], raw) -> dict[str, str]:
+    """Config values layered over the built-in stage defaults.
+
+    A stage the user does not mention keeps its default; one they set to ""
+    explicitly falls back to [anthropic] model (or sends no effort), which is
+    the escape hatch for a model that rejects the parameter.
+    """
+    out = dict(defaults)
+    if isinstance(raw, dict):
+        for k, v in raw.items():
+            out[str(k)] = str(v)
+    return out
 
 
 def _load(path: Path) -> Config:
@@ -197,6 +256,13 @@ def _load(path: Path) -> Config:
         timeout=int(anthropic_raw.get("timeout", 300)),
         monthly_budget_usd=float(anthropic_raw.get("monthly_budget_usd", 15.0)),
         max_calls_per_run=int(anthropic_raw.get("max_calls_per_run", 80)),
+        stage_models=_stage_overrides(
+            DEFAULT_STAGE_MODELS, anthropic_raw.get("stage_models", {})
+        ),
+        stage_effort=_stage_overrides(
+            DEFAULT_STAGE_EFFORT, anthropic_raw.get("stage_effort", {})
+        ),
+        lecture_max_tokens=int(anthropic_raw.get("lecture_max_tokens", 32000)),
     )
     quality_raw = raw.get("quality", {})
     quality = QualityConfig(
@@ -219,6 +285,13 @@ def _load(path: Path) -> Config:
         ),
     )
     calendar = CalendarConfig(ics_url=raw.get("calendar", {}).get("ics_url", ""))
+    lecture_raw = raw.get("lecture", {})
+    lecture = LectureConfig(
+        enabled=bool(lecture_raw.get("enabled", True)),
+        pdf=bool(lecture_raw.get("pdf", True)),
+        min_visuals=int(lecture_raw.get("min_visuals", 2)),
+        max_visuals=int(lecture_raw.get("max_visuals", 5)),
+    )
     sync = SyncConfig(interval_seconds=int(raw.get("sync", {}).get("interval_seconds", 1200)))
     web_raw = raw.get("web", {})
     web = WebConfig(host=web_raw.get("host", "127.0.0.1"), port=int(web_raw.get("port", 8787)))
@@ -233,6 +306,7 @@ def _load(path: Path) -> Config:
         calendar=calendar,
         sync=sync,
         web=web,
+        lecture=lecture,
     )
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
     cfg.logs_dir.mkdir(parents=True, exist_ok=True)

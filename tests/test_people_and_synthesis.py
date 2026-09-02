@@ -122,3 +122,87 @@ def test_digest_citation_gate_drops_fabrications(cfg):
     assert "Angela will review the deck." in text
     assert "Fabricated claim." not in text
     assert "1 claim(s) dropped by the citation gate" in text
+
+
+# ---------- the synthesis stage is configurable, not just documented ----------
+
+
+class RecordingClient:
+    """Stands in for the Anthropic SDK client, capturing each request.
+
+    A real `LLM` sits in front of it, so the model and effort under test are
+    the ones its own stage resolution produced — not values a stub echoed
+    back.
+    """
+
+    def __init__(self, payload):
+        import json
+
+        self._body = json.dumps(payload)
+        self.requests = []
+        self.messages = self
+
+    def create(self, **kwargs):
+        from types import SimpleNamespace
+
+        self.requests.append(kwargs)
+        return SimpleNamespace(
+            stop_reason="end_turn",
+            content=[SimpleNamespace(type="text", text=self._body)],
+            usage=SimpleNamespace(
+                input_tokens=10, output_tokens=10,
+                cache_read_input_tokens=0, cache_creation_input_tokens=0,
+            ),
+        )
+
+
+DIGEST_PAYLOAD = {
+    "headline": "One real thing happened.",
+    "sections": [{
+        "title": "Decisions",
+        "claims": [{"text": "Angela will review the deck.", "source_id": "t1",
+                    "quote": "review the pricing deck by Friday"}],
+    }],
+}
+
+
+def run_digest(cfg):
+    """One digest through a real LLM against a recording client."""
+    from datetime import date
+
+    from transcript_analyzer.pipeline.llm import LLM
+
+    llm = LLM(cfg)
+    client = RecordingClient(DIGEST_PAYLOAD)
+    llm._client = client
+    recs = [make_record(tid="t1", title="2026-07-15 a", date_str="2026-07-15")]
+    synthesize.digest(cfg, llm, recs, date(2026, 7, 16))
+    assert client.requests, "no request reached the client"
+    return client.requests[0]
+
+
+def test_a_configured_synthesis_model_actually_reaches_the_call(cfg):
+    """`[anthropic.stage_models] synthesis` was advertised but never wired, so
+    an operator pointing synthesis at a cheaper model kept paying Opus."""
+    from dataclasses import replace
+
+    cfg = replace(cfg, anthropic=replace(
+        cfg.anthropic,
+        stage_models={**cfg.anthropic.stage_models, "synthesis": "claude-haiku-4-5"},
+        stage_effort={**cfg.anthropic.stage_effort, "synthesis": "low"},
+    ))
+
+    request = run_digest(cfg)
+
+    assert request["model"] == "claude-haiku-4-5"
+    assert request["output_config"]["effort"] == "low"
+    # The schema that makes the response parseable survives the merge.
+    assert request["output_config"]["format"]["type"] == "json_schema"
+
+
+def test_synthesis_with_no_override_is_unchanged(cfg):
+    """Wiring the stage must not move anyone who configured nothing."""
+    request = run_digest(cfg)
+
+    assert request["model"] == cfg.anthropic.model
+    assert "effort" not in request["output_config"]

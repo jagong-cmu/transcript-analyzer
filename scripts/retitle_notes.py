@@ -5,8 +5,9 @@ Updates each note's `headline` frontmatter and H1 to:
   Pricing deck review with Angela, July 1st, 2026
 
 By default uses Claude for accurate headlines. Pass --cheap to derive from
-the existing summary (no API calls). Renames files (and matching audio) to
-match the new headline slug, then reindexes.
+the existing summary (no API calls). Renames files — and the matching audio
+and lecture study notes, each proven to be this transcript's at both ends —
+to match the new headline slug, then reindexes.
 
 Usage:
     python scripts/retitle_notes.py
@@ -42,6 +43,7 @@ from transcript_analyzer.titles import (  # noqa: E402
     format_long_date,
     headline_from_summary,
     parse_date,
+    retrieval_abstract,
 )
 
 HEADLINE_SCHEMA = {
@@ -58,6 +60,21 @@ HEADLINE_SCHEMA = {
 HEADLINE_SYSTEM = """You write short, specific titles for meeting transcripts.
 Return JSON only. No dates in the title. Prefer concrete topics and people
 over generic words like Meeting, Sync, or Call."""
+
+
+def _headline_source(post) -> str:
+    """The text a headline is derived from: the SHORT retrieval abstract.
+
+    The body's '## Summary' is the long structured summary now, and the
+    extraction prompt asks the model to open it with '###' subheadings — so
+    deriving a headline from it yields '### Opening The class opened with a
+    recap', which `_target_path` then slugifies into a real filename in a
+    vault that has no backup. `abstract:` is the field that is still one
+    bounded paragraph; a legacy note without one falls back to the body
+    summary through the same bound the indexer applies.
+    """
+    abstract = " ".join(str(post.get("abstract") or "").split())
+    return abstract or retrieval_abstract(_extract_summary(post.content))
 
 
 def _set_h1(body: str, title: str) -> str:
@@ -97,13 +114,32 @@ def _rename_with_audio(cfg, old: Path, new: Path, transcript_id: str, *, dry_run
         return new
     new.parent.mkdir(parents=True, exist_ok=True)
     old_audio = writer.audio_path_for(cfg, old)
+    # The ladder may have put the study notes off the plain stem; the links
+    # below name the file that is really there.
+    old_study = writer.resolve_study_note_path(cfg, old, transcript_id)
+    # Both moves run BEFORE the rename: each proves ownership through the note
+    # at the source stem, and after the rename that stem no longer holds it.
     new_audio = writer.move_audio_with_note(cfg, old, new, transcript_id)
+    new_study = writer.move_study_with_note(cfg, old, new, transcript_id)
     old.rename(new)
-    if new_audio is not None:
-        # Fix embed reference inside the note if present.
+    if new_audio is not None or new_study is not None:
+        # Fix the links inside the note, which name files by stem.
         text = new.read_text(encoding="utf-8")
-        text = text.replace(f"![[{old_audio.name}]]", f"![[{new_audio.name}]]")
+        if new_audio is not None:
+            text = text.replace(f"![[{old_audio.name}]]", f"![[{new_audio.name}]]")
+        if new_study is not None and old_study is not None:
+            text = text.replace(f"[[{old_study.stem}", f"[[{new_study.stem}")
         new.write_text(text, encoding="utf-8")
+    if new_study is not None and old_study is not None:
+        # The study note carries its own stem-keyed links — back to the
+        # recording, and to its PDF — and nothing regenerates them: this
+        # script is one-shot. Rewrite them where they now live.
+        study_text = new_study.read_text(encoding="utf-8")
+        study_text = study_text.replace(f"[[{old.stem}|", f"[[{new.stem}|")
+        study_text = study_text.replace(
+            f"[[{old_study.stem}.pdf|", f"[[{new_study.stem}.pdf|"
+        )
+        new_study.write_text(study_text, encoding="utf-8")
     with get_conn(cfg.db_path) as conn:
         # note_path is not unique — sync_state is keyed on (source, native_id),
         # and a deleted-then-retaken filename legitimately leaves two rows
@@ -182,7 +218,7 @@ def retitle(
             skipped += 1
             continue
 
-        summary = _extract_summary(post.content)
+        summary = _headline_source(post)
         people = []
         for p in post.get("people") or []:
             people.append(re.sub(r"[\[\]]", "", str(p)).strip())

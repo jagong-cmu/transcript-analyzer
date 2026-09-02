@@ -18,20 +18,29 @@ from typing import Iterable, Optional
 
 from .config import Config, load_config
 from .connectors import pocket
+from .courses import index_courses
 from .db import (
     canonical_note_path,
     get_conn,
     get_meta,
     get_sync_hash,
     get_sync_note_path,
+    known_course_rows,
     record_sync,
     set_meta,
 )
-from .models import Transcript
+from .models import Insight, Transcript
 from .obsidian import writer
-from .pipeline.indexer import index_note
+from .pipeline import lecture
+from .pipeline.indexer import index_note, insight_from_note
 from .pipeline.insights import extract_insight
-from .pipeline.llm import LLM, LLMBudgetError, LLMKillSwitchError
+from .pipeline.llm import (
+    LLM,
+    LLMBudgetError,
+    LLMKillSwitchError,
+    LLMResponseError,
+    LLMTruncatedError,
+)
 from .pipeline.quality import junk_reason
 from .titles import compose_display_title
 
@@ -42,6 +51,12 @@ FAILURE_COUNTER_KEY = "insight_failures_total"
 # Marks a sync_state row whose note is written but whose recording still has to
 # be fetched, so the stored hash cannot match and the next pass reprocesses it.
 AUDIO_RETRY_HASH_SUFFIX = ":audio-retry"
+
+# How many times a study-notes response that MIGHT be transient is retried
+# before the note is written with a visible failure marker instead. Each retry
+# is a full lecture-stage call, so an unbounded one bills a 32k-output Opus 5
+# request every sync interval until the monthly ceiling stops all ingestion.
+STUDY_NOTE_MAX_ATTEMPTS = 3
 
 
 def _high_water_key(source: str) -> str:
@@ -164,6 +179,136 @@ def _count_failure(cfg: Config) -> int:
     return total
 
 
+def _known_courses(cfg: Config) -> dict:
+    """The courses the index already holds, so a lecture rejoins its own.
+
+    Read fresh per transcript rather than once per run: a sync pass that
+    ingests week 1 and week 2 of the same course in one go must let the second
+    bind to the first (see courses.py).
+    """
+    with get_conn(cfg.db_path) as conn:
+        return index_courses(known_course_rows(conn))
+
+
+def _insight_for(
+    cfg: Config, transcript: Transcript, llm: LLM, previous: Optional[Path] = None
+) -> tuple[Insight, str]:
+    """(insight, terminal failure reason) for the extraction pass.
+
+    The SAME deterministic-failure rule the lecture stage follows, at the stage
+    that runs on every transcript. A response cut off at the output cap is not
+    transient: the same transcript against the same cap overflows identically
+    forever, so letting it propagate to `sync`'s per-transcript handler means
+    `record_sync` is never reached and the next cycle buys the same overflow
+    again, every interval, until the monthly ceiling halts ingestion for
+    everything else.
+
+    So it is recorded instead of retried: the reason comes back, the note is
+    written carrying a visible marker, and `record_sync` is reached, so it
+    bills ONCE.
+
+    What the note SAYS in that case is whatever the last complete extraction
+    left, read back off the note itself. A degraded pass must never be a
+    downgrade: an empty payload would blank the summary, the key points, the
+    action items and the `kind` — and, because the headline drives the
+    filename, rename the note and strand its recording. There is nothing to
+    carry only when this transcript has no note yet, and then the marker
+    stands alone.
+
+    Kill-switch and budget errors still propagate untouched, and every other
+    failure still reaches the caller's handler unchanged.
+    """
+    try:
+        return extract_insight(
+            transcript, cfg, llm=llm, known_courses=_known_courses(cfg)
+        ), ""
+    except LLMTruncatedError as e:
+        _log.warning(
+            "extraction for %r overflowed the output cap (%s); marking the note "
+            "and keeping what the last complete extraction wrote, rather than "
+            "paying for the same overflow every cycle",
+            transcript.title, e,
+        )
+        carried = insight_from_note(previous) if previous is not None else None
+        return (carried or Insight()), str(e)
+
+
+def _study_attempts_key(transcript_id: str) -> str:
+    return f"study_attempts:{transcript_id}"
+
+
+def _bump_study_attempts(cfg: Config, transcript_id: str) -> int:
+    with get_conn(cfg.db_path) as conn:
+        key = _study_attempts_key(transcript_id)
+        n = int(get_meta(conn, key) or 0) + 1
+        set_meta(conn, key, str(n))
+    return n
+
+
+def _clear_study_attempts(cfg: Config, transcript_id: str) -> None:
+    with get_conn(cfg.db_path) as conn:
+        set_meta(conn, _study_attempts_key(transcript_id), "0")
+
+
+def _study_notes_for(
+    cfg: Config, transcript: Transcript, insight: Insight, llm: LLM, note_path: Path
+) -> tuple[Optional["lecture.StudyOutcome"], str]:
+    """(outcome, terminal failure reason) for one lecture's study-notes pass.
+
+    Three postures, because "the response was bad" is not one failure.
+
+    Budget and kill-switch errors PROPAGATE: they mean stop the whole run.
+
+    A TRUNCATED response is deterministic — the same transcript against the
+    same `lecture_max_tokens` overflows identically forever — so retrying it
+    buys nothing and re-bills a 32k-output Opus 5 call every sync cycle until
+    the monthly ceiling halts ingestion for everything else. It is terminal on
+    the first attempt: the reason comes back, the note is written carrying a
+    visible marker, and `record_sync` is reached so the transcript is not
+    reprocessed. One extract call, one lecture call, then done.
+
+    Any other unusable response MIGHT be transient, so it is retried — but a
+    bounded number of times, ending in that same terminal marked note rather
+    than looping forever.
+
+    Everything else is contained: a note with a detailed summary and no study
+    notes is still the deliverable. A renderer failure never reaches here at
+    all — `lecture.produce` handles it and still writes the markdown.
+    """
+    if not (insight.is_lecture and cfg.lecture.enabled):
+        return None, ""
+    try:
+        outcome = lecture.produce(cfg, transcript, insight, note_path, llm)
+    except (LLMKillSwitchError, LLMBudgetError):
+        raise
+    except LLMTruncatedError as e:
+        _clear_study_attempts(cfg, transcript.id)
+        _log.warning(
+            "study notes for %s overflowed the output cap (%s); writing the "
+            "note with a failure marker rather than paying for the same "
+            "overflow every cycle", note_path.name, e,
+        )
+        return None, str(e)
+    except LLMResponseError as e:
+        attempts = _bump_study_attempts(cfg, transcript.id)
+        if attempts < STUDY_NOTE_MAX_ATTEMPTS:
+            raise
+        _clear_study_attempts(cfg, transcript.id)
+        _log.warning(
+            "study notes for %s failed %d times (%s); writing the note with a "
+            "failure marker", note_path.name, attempts, e,
+        )
+        return None, str(e)
+    except Exception as e:  # noqa: BLE001 - study notes must not cost the note
+        _log.warning(
+            "study notes failed for %s (%s); writing the note without them",
+            note_path.name, e,
+        )
+        return None, ""
+    _clear_study_attempts(cfg, transcript.id)
+    return outcome, ""
+
+
 def process_transcript(
     cfg: Config,
     transcript: Transcript,
@@ -171,7 +316,14 @@ def process_transcript(
     *,
     dry_run: bool = False,
 ) -> dict:
-    insight = extract_insight(transcript, cfg, llm=llm)
+    # The note this transcript already has, proven ours, resolved BEFORE the
+    # extraction: a truncated pass carries its content forward rather than
+    # replacing it with a blank.
+    with get_conn(cfg.db_path) as conn:
+        prev_path = get_sync_note_path(conn, transcript.source, transcript.native_id)
+    prev_note = _owned_prev_note(prev_path, transcript)
+
+    insight, extract_error = _insight_for(cfg, transcript, llm, previous=prev_note)
     display = compose_display_title(
         insight.headline or transcript.title, transcript.date
     )
@@ -179,34 +331,87 @@ def process_transcript(
         "id": transcript.id,
         "title": display,
         "source": transcript.source,
+        "kind": insight.kind,
         "note_path": None,
+        "study_notes": None,
+        "study_pdf": None,
+        "study_error": None,
+        "extract_error": extract_error or None,
     }
     if dry_run:
         return result
 
-    # If this transcript was previously written under a different category/name,
-    # remove the stale note file so we don't leave duplicates in the vault.
-    with get_conn(cfg.db_path) as conn:
-        prev_path = get_sync_note_path(conn, transcript.source, transcript.native_id)
+    # A DEGRADED pass — one whose extraction truncated — never renames and
+    # never deletes. It has no new headline to justify moving a note, an mp3
+    # and a study stem, and `record_sync` below would make the move permanent.
+    # It writes exactly where the note already is; only a transcript with no
+    # note yet takes a fresh stem.
+    degraded = bool(extract_error) and prev_note is not None
+    prospective = (
+        prev_note if degraded else writer.note_path_for(cfg, transcript, insight)
+    )
 
-    # A re-worded headline renames the note; carry its recording across first,
-    # so the download below finds the file the vault already has.
-    prev_note = _owned_prev_note(prev_path, transcript)
-    prospective = writer.note_path_for(cfg, transcript, insight)
-    if prev_note and canonical_note_path(prev_note) != canonical_note_path(prospective):
+    # EVERY step that can propagate runs before EVERY step that mutates the
+    # vault. The lecture pass is the propagating one (budget, kill switch, a
+    # response worth retrying), so it goes first: a failure after the rename
+    # moves or the download would leave an mp3 or a study note on a stem no
+    # note ever occupies, `claimable_stem` would refuse that stem forever
+    # after, and every retry would land one rung up the ladder and re-fetch
+    # the whole recording.
+    study, study_error = _study_notes_for(cfg, transcript, insight, llm, prospective)
+    if study is not None:
+        result["study_notes"] = str(study.study_path) if study.study_path else None
+        result["study_pdf"] = str(study.pdf_path) if study.pdf_path else None
+        # The study-notes pass reads the whole lecture at the highest-effort
+        # model in the system, so its overview is the better detailed summary.
+        if study.notes.overview:
+            insight = insight.model_copy(
+                update={"detailed_summary": study.notes.overview}
+            )
+    result["study_error"] = study_error or None
+
+    # A re-worded headline renames the note; carry its recording and its study
+    # notes across, so nothing below writes a second copy beside them. The
+    # study move is skipped when the pass just wrote fresh notes at the
+    # destination stem — moving the superseded ones over them would destroy
+    # what was generated moments ago.
+    if (
+        prev_note
+        and not degraded
+        and canonical_note_path(prev_note) != canonical_note_path(prospective)
+    ):
         writer.move_audio_with_note(cfg, prev_note, prospective, transcript.id)
+        if study is None:
+            writer.move_study_with_note(cfg, prev_note, prospective, transcript.id)
 
     # Download the recording's audio into the vault (Pocket only) and embed it.
     audio_name, audio_still_owed = _maybe_download_audio(cfg, transcript, prospective)
 
     # The claim above is the ONE decision: the download wrote the mp3 against
     # it and the body embeds that name, so the note has to land on it too.
+    # `previous` is what a rename carries across — the owner's tail, their
+    # ticked boxes, the study link — because the destination stem is empty
+    # until this write lands.
     note_path = writer.write_note(
-        cfg, transcript, insight, audio_name=audio_name, path=prospective
+        cfg,
+        transcript,
+        insight,
+        audio_name=audio_name,
+        path=prospective,
+        previous=prev_note,
+        study_stem_name=study.stem if study else None,
+        has_study_pdf=bool(study and study.pdf_path),
+        study_error=study_error,
+        extract_error=extract_error,
+        asr_repairs=study.notes.asr_repairs if study else None,
     )
     result["note_path"] = str(note_path)
 
-    if prev_note and _is_stale_note(prev_note, note_path, transcript.id):
+    # STRICTLY after the write: the new note now provably carries what the old
+    # one held, so removing the old one loses nothing. A failure between the
+    # two leaves an orphan to clean up by hand, which this vault can recover
+    # from — a delete before the write is not recoverable at all.
+    if prev_note and not degraded and _is_stale_note(prev_note, note_path, transcript.id):
         try:
             os.remove(prev_note)
         except OSError:

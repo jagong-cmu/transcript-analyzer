@@ -15,6 +15,7 @@
     <a href="/people" class="{% if request.url.path.startswith('/people') %}active{% endif %}">People</a>
     <a href="/prep" class="{% if request.url.path.startswith('/prep') %}active{% endif %}">Prep</a>
     <a href="/chat" class="{% if request.url.path.startswith('/chat') %}active{% endif %}">Ask</a>
+    <a href="/lectures" class="{% if request.url.path.startswith('/lectures') %}active{% endif %}">Lectures</a>
     <a href="/browse" class="{% if request.url.path.startswith('/browse') or request.url.path.startswith('/category') or request.url.path.startswith('/transcript') %}active{% endif %}">Browse</a>
   </nav>
 </header>
@@ -27,6 +28,7 @@
       <li><a href="/people">People dossiers</a></li>
       <li><a href="/studies">Studies</a></li>
       <li><a href="/prep">Meeting prep</a></li>
+      <li><a href="/lectures">Lectures</a></li>
     </ul>
     {% if categories %}
     <div class="sidebar-title" style="margin-top:22px">Categories</div>

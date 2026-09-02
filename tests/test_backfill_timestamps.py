@@ -443,3 +443,28 @@ def test_two_sync_state_rows_for_one_note_skip_rather_than_guessing(cfg, monkeyp
     assert summary["updated"] == 0
     assert summary["skipped"] == 1
     assert note.read_text(encoding="utf-8") == before
+
+
+def test_the_timestamp_rewrite_keeps_the_managed_end_marker(cfg):
+    """A note now ends with the managed marker, and everything below the
+    transcript callout — the marker included — is not this script's to move."""
+    from datetime import date as _date
+
+    from transcript_analyzer.models import Insight, Transcript
+    from transcript_analyzer.obsidian import writer
+    from transcript_analyzer.pipeline.indexer import extract_transcript
+
+    transcript = Transcript(
+        id="ts1", source="pocket", native_id="n1", title="raw",
+        date=_date(2026, 9, 1), text="Angela: untimed original.",
+    )
+    path = writer.write_note(cfg, transcript, Insight(headline="H", summary="s"))
+    path.write_text(path.read_text() + "\n## My own notes\nKept.\n", encoding="utf-8")
+
+    rewritten = backfill_timestamps._replace_transcript_section(
+        path.read_text(), "[0:00] Angela: now with timing."
+    )
+    assert extract_transcript(rewritten) == "[0:00] Angela: now with timing."
+    assert rewritten.count(writer.NOTE_END) == 1
+    assert "Kept." in rewritten
+    assert "untimed original" not in rewritten

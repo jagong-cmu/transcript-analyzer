@@ -23,38 +23,46 @@ import frontmatter
 
 from ..config import Config
 from ..db import get_conn, upsert_transcript
-from ..models import Attendee, NoteRecord
-from ..obsidian.writer import heading_level, opens_section
-from ..titles import clean_headline, compose_display_title, headline_from_summary
+from ..models import DEFAULT_KIND, Attendee, Insight, NoteRecord, coerce_kind
+from ..obsidian.writer import (
+    STUDY_SUBDIR,
+    is_section_end,
+    is_section_start,
+    parse_action_items,
+    transcript_bounds,
+)
+from ..titles import (
+    clean_headline,
+    compose_display_title,
+    headline_from_summary,
+    retrieval_abstract,
+)
+
+# `is_section_start` / `is_section_end` / `transcript_bounds` /
+# `parse_action_items` are the WRITER's definitions, imported here so the
+# reader and the writer cannot disagree about what a heading is, where the
+# transcript callout ends, or which boxes are ticked (AGENTS.md). Re-exported
+# because the one-shot migration scripts read notes through them too.
+__all__ = [
+    "EXCLUDED_SUBDIRS",
+    "extract_transcript",
+    "index_note",
+    "is_section_end",
+    "is_section_start",
+    "parse_note",
+    "reindex_all",
+]
 
 _log = logging.getLogger(__name__)
 
 _WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
-_CHECKBOX_RE = re.compile(r"^\s*-\s*\[( |x|X)\]\s*(.+?)\s*$")
 
-# Subfolders of the insights folder that are never transcript notes.
+# Subfolders of the insights folder that are never transcript notes. Every
+# namespace synthesis writes into belongs here AND in writer.SYNTH_SUBDIRS;
+# a namespace missing from this set is re-ingested as if it were a transcript.
 EXCLUDED_SUBDIRS = frozenset(
-    {"Categories", "Digests", "People", "Studies", "Prep", "Attachments"}
+    {"Categories", "Digests", "People", "Studies", "Prep", "Attachments", STUDY_SUBDIR}
 )
-
-
-def is_section_start(line: str, heading: str) -> bool:
-    """Whether `line` opens the named section ('## transcript', lowercase).
-
-    Section detection goes through writer.opens_section so the reader and the
-    writer cannot disagree about what a heading is; see AGENTS.md.
-    """
-    return opens_section(line) and line.strip().lower() == heading
-
-
-def is_section_end(line: str, heading: str) -> bool:
-    """Whether `line` closes the section that `heading` opened.
-
-    The same predicate as the start, bounded to the section's own level: a
-    sibling or shallower heading ends it, a deeper one the vault owner wrote
-    ('### Context' under '## Summary') is nested inside and stays indexed.
-    """
-    return opens_section(line, max_level=heading_level(heading))
 
 
 def _strip_wikilink(s: str) -> str:
@@ -62,30 +70,24 @@ def _strip_wikilink(s: str) -> str:
     return m.group(1).strip() if m else s.strip()
 
 
-def _extract_transcript(body: str) -> str:
+def extract_transcript(body: str) -> str:
     """Pull the transcript text out of the '## Transcript' callout block.
 
-    The section is the heading, an optional run of blank lines, and then the
-    contiguous run of '>' lines that is the callout — the same grammar the
-    writer emits and the timestamp backfill rewrites. Reading past the end of
-    that run would fold a callout the vault owner appended below the transcript
-    into transcript_text, publishing it in the dashboard and the RAG corpus.
-    An interior blank transcript line is written as '> ', so it stays inside.
+    Where the callout ends is `writer.transcript_bounds` — the one definition,
+    shared with the writer that emits it and the timestamp backfill that
+    rewrites it. Reading past that run would fold a callout the vault owner
+    appended below the transcript into transcript_text, publishing it in the
+    dashboard and the RAG corpus.
     """
     lines = body.splitlines()
-    start = next(
-        (i for i, ln in enumerate(lines) if is_section_start(ln, "## transcript")),
-        None,
-    )
-    if start is None:
+    bounds = transcript_bounds(lines)
+    if bounds is None:
         return ""
-    i = start + 1
-    while i < len(lines) and not lines[i].strip():
-        i += 1
+    start, end = bounds
     out: list[str] = []
-    while i < len(lines) and lines[i].startswith(">"):
-        ln = lines[i]
-        i += 1
+    for ln in lines[start + 1: end + 1]:
+        if not ln.startswith(">"):
+            continue
         # skip the "[!note]- ..." callout header line
         if ln.lstrip(">").strip().startswith("[!"):
             continue
@@ -93,8 +95,14 @@ def _extract_transcript(body: str) -> str:
     return "\n".join(out).strip()
 
 
-def _extract_summary(body: str) -> str:
-    """Body text under '## Summary', up to the next section at that level.
+# The one-shot migration scripts read a note's transcript back through the
+# same extractor the index uses, so a rewrite can never disagree with what was
+# indexed. Kept under the old private name too, for existing call sites.
+_extract_transcript = extract_transcript
+
+
+def section_body(body: str, heading: str) -> str:
+    """Body text under `heading` (lowercase, e.g. '## summary').
 
     Both boundaries go through the same heading predicate, so they cannot
     disagree about the same line (see AGENTS.md: add call sites, not second
@@ -104,35 +112,37 @@ def _extract_summary(body: str) -> str:
     out: list[str] = []
     in_section = False
     for ln in lines:
-        if is_section_start(ln, "## summary"):
+        if is_section_start(ln, heading):
             in_section = True
             continue
         if in_section:
-            if is_section_end(ln, "## summary"):
+            if is_section_end(ln, heading):
                 break
             out.append(ln)
     return "\n".join(out).strip()
 
 
-def _extract_action_items(body: str) -> list[tuple[str, bool]]:
-    """(text, done) pairs from the '## Action Items' checkbox list. The note
-    is the source of truth: ticking a box in Obsidian closes the commitment,
-    and a commitment the owner filed under their own '### …' sub-heading is
-    still one of theirs. The section ends as `is_section_end` says, as above."""
-    lines = body.splitlines()
-    out: list[tuple[str, bool]] = []
-    in_section = False
-    for ln in lines:
-        if is_section_start(ln, "## action items"):
-            in_section = True
+def _extract_summary(body: str) -> str:
+    return section_body(body, "## summary")
+
+
+def _extract_bullets(body: str, heading: str) -> list[str]:
+    """The '- ' items under `heading`, skipping the '- _None._' placeholder."""
+    out = []
+    for ln in section_body(body, heading).splitlines():
+        item = ln.strip()
+        if not item.startswith("- "):
             continue
-        if in_section:
-            if is_section_end(ln, "## action items"):
-                break
-            m = _CHECKBOX_RE.match(ln)
-            if m:
-                out.append((m.group(2), m.group(1).lower() == "x"))
+        item = item[2:].strip()
+        if item and item != "_None._":
+            out.append(item)
     return out
+
+
+# The '## Action Items' checkbox scan is `writer.parse_action_items` — one
+# definition, because the writer has to read the same ticks back when it
+# regenerates a note and must not reopen a commitment the owner closed.
+_extract_action_items = parse_action_items
 
 
 def _parse_attendees(meta: dict) -> list[Attendee]:
@@ -185,12 +195,23 @@ def _parse_note(path: Path) -> Optional[NoteRecord]:
         action_items = fm_action_items
         open_items = fm_action_items
 
-    summary = _extract_summary(post.content)
+    # The body's '## Summary' is the LONG summary the reader gets; the short
+    # retrieval abstract lives in frontmatter. A note written before that split
+    # has no `abstract:` — its body summary was already short, so it becomes
+    # both, and the corpus every Ask question carries does not silently grow.
+    detailed = _extract_summary(post.content)
+    # A note whose extraction was truncated has a FAILURE MARKER where its
+    # summary would be. Falling back to that would put the marker into the
+    # field every corpus-wide reader sends on every question, and into the
+    # haystack the citation gate quotes against, describing the failure as if
+    # it were the conversation. No abstract is honest; the marker is not.
+    fallback = "" if meta.get("extract_error") else detailed
+    abstract = retrieval_abstract(str(meta.get("abstract") or "") or fallback)
     headline = clean_headline(str(meta.get("headline") or ""))
     if not headline:
         # Legacy notes: prefer H1 with date stripped, else first summary sentence.
         headline = clean_headline(_extract_h1(post.content)) or headline_from_summary(
-            summary, fallback=path.stem
+            abstract, fallback=path.stem
         )
     display_title = _display_title(headline, date_str)
 
@@ -205,9 +226,13 @@ def _parse_note(path: Path) -> Optional[NoteRecord]:
         action_items=action_items,
         open_action_items=open_items,
         attendees=_parse_attendees(meta),
-        summary=summary,
+        summary=abstract,
+        detailed_summary=detailed,
+        kind=coerce_kind(str(meta.get("kind") or DEFAULT_KIND)),
+        course_code=str(meta.get("course_code") or "").strip(),
+        course_name=str(meta.get("course_name") or "").strip(),
         note_path=str(path.resolve()),
-        transcript_text=_extract_transcript(post.content),
+        transcript_text=extract_transcript(post.content),
     )
 
 
@@ -222,6 +247,43 @@ def _display_title(headline: str, date_str: str) -> str:
         return compose_display_title(headline, date_str) if date_str else headline
     except ValueError:
         return headline
+
+
+def insight_from_note(path: Path) -> Optional[Insight]:
+    """The insight a note ALREADY carries, read back off the note itself.
+
+    For a pass that cannot improve on what is there: extraction truncated, so
+    there is nothing new to write, and regenerating the note from an empty
+    payload would replace a good summary, its key points, its action items and
+    its `kind` with blanks — and, because the headline drives the filename,
+    rename the note and orphan its recording on the way. Reading the last good
+    extraction back means a degraded pass ADDS its marker instead.
+
+    The note is the source of truth, so this is the same read `parse_note`
+    does; None when the file cannot be parsed at all.
+    """
+    try:
+        post = frontmatter.load(str(path))
+    except Exception:  # noqa: BLE001 - an unreadable note simply carries nothing
+        return None
+    meta = post.metadata
+    body_items = [text for text, _done in _extract_action_items(post.content)]
+    # A note whose own extraction was truncated has the marker where its
+    # summary belongs; carrying that forward would stack markers.
+    detailed = "" if meta.get("extract_error") else _extract_summary(post.content)
+    return Insight(
+        headline=clean_headline(str(meta.get("headline") or "")),
+        summary=str(meta.get("abstract") or "").strip(),
+        detailed_summary=detailed,
+        key_points=_extract_bullets(post.content, "## key points"),
+        action_items=body_items or [str(a) for a in (meta.get("action_items") or [])],
+        people=[_strip_wikilink(str(p)) for p in (meta.get("people") or [])],
+        topics=[str(t) for t in (meta.get("topics") or [])],
+        kind=coerce_kind(str(meta.get("kind") or DEFAULT_KIND)),
+        course_code=str(meta.get("course_code") or "").strip(),
+        course_name=str(meta.get("course_name") or "").strip(),
+        sentiment=str(meta.get("sentiment") or "").strip() or None,
+    )
 
 
 def _extract_h1(body: str) -> str:
